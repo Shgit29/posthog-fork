@@ -1,6 +1,7 @@
-import { actions, afterMount, kea, path, props, selectors } from 'kea'
+import { actions, afterMount, connect, kea, path, props, selectors } from 'kea'
 import { loaders } from 'kea-loaders'
-import { FunnelLayout } from 'lib/constants'
+import { FEATURE_FLAGS, FunnelLayout } from 'lib/constants'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { match, P } from 'ts-pattern'
 
 import { performQuery } from '~/queries/query'
@@ -11,7 +12,7 @@ import type {
     InsightVizNode,
     TrendsQuery,
 } from '~/queries/schema/schema-general'
-import { NodeKind } from '~/queries/schema/schema-general'
+import { ExperimentMetricType, isExperimentFunnelMetric, NodeKind } from '~/queries/schema/schema-general'
 import {
     addExposureToMetric,
     compose,
@@ -56,6 +57,10 @@ export const resultsBreakdownLogic = kea<resultsBreakdownLogicType>([
 
     path((key) => ['scenes', 'experiment', 'experimentResultBreakdownLogic', key]),
 
+    connect(() => ({
+        values: [featureFlagLogic, ['featureFlags']],
+    })),
+
     actions({
         loadBreakdownResults: true,
     }),
@@ -94,13 +99,18 @@ export const resultsBreakdownLogic = kea<resultsBreakdownLogicType>([
                         filterTestAccounts: !!experiment.exposure_criteria?.filterTestAccounts,
                         dateRange: getExperimentDateRange(experiment),
                         breakdownFilter: {
-                            breakdown: `$feature/${experiment.feature_flag_key}`,
+                            breakdown:
+                                exposureEventNode.event === '$feature_flag_called'
+                                    ? '$feature_flag_response'
+                                    : `$feature/${experiment.feature_flag_key}`,
                             breakdown_type: 'event',
                         },
                         funnelsFilter: {
                             layout: FunnelLayout.vertical,
                             breakdownAttributionType: BreakdownAttributionType.FirstTouch,
-                            funnelOrderType: StepOrderValue.ORDERED,
+                            funnelOrderType:
+                                (isExperimentFunnelMetric(metric) && metric.funnel_order_type) ||
+                                StepOrderValue.ORDERED,
                             funnelStepReference: FunnelStepReference.total,
                             funnelVizType: FunnelVizType.Steps,
                             funnelWindowInterval: 14,
@@ -160,13 +170,16 @@ export const resultsBreakdownLogic = kea<resultsBreakdownLogicType>([
 
                         results = match(results)
                             /**
-                             * filter for FunnelSteps[][]
+                             * filter for FunnelSteps[][]. In this case, we get an array for each breakdown group,
+                             * each with an array of steps. We need to filter for each group and remove any empty arrays.
                              */
                             .with(P.array(P.array({ breakdown_value: P.any })), (nestedSteps) =>
-                                nestedSteps.map((stepGroup) => filterFunnelSteps(stepGroup, variants))
+                                nestedSteps
+                                    .map((stepGroup) => filterFunnelSteps(stepGroup, variants))
+                                    .filter((steps) => steps.length > 0)
                             )
                             /**
-                             * filter for FunnelSteps[]
+                             * filter for FunnelSteps[]. In this case, we just get an array of steps
                              */
                             .with(P.array({ breakdown_value: P.any }), (flatSteps) =>
                                 filterFunnelSteps(flatSteps, variants)
@@ -186,7 +199,13 @@ export const resultsBreakdownLogic = kea<resultsBreakdownLogicType>([
         ],
     })),
 
-    afterMount(({ actions, props }) => {
+    afterMount(({ actions, props, values }) => {
+        const isEnabled = values.featureFlags[FEATURE_FLAGS.EXPERIMENTS_NEW_RUNNER_RESULTS_BREAKDOWN]
+
+        if (!isEnabled) {
+            return
+        }
+
         const { metric, experiment } = props
 
         // bail if no valid props
@@ -195,7 +214,7 @@ export const resultsBreakdownLogic = kea<resultsBreakdownLogicType>([
         }
 
         // bail if unsupported metric type
-        if (metric.kind !== NodeKind.ExperimentMetric) {
+        if (metric.kind !== NodeKind.ExperimentMetric || metric.metric_type !== ExperimentMetricType.FUNNEL) {
             return
         }
 
