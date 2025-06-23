@@ -149,7 +149,7 @@ import {
     UserType,
 } from '~/types'
 
-import { MaxContextShape } from '../scenes/max/maxTypes'
+import { MaxBillingContext, MaxContextShape } from '../scenes/max/maxTypes'
 import { AlertType, AlertTypeWrite } from './components/Alerts/types'
 import {
     ErrorTrackingStackFrame,
@@ -3511,6 +3511,7 @@ const api = {
                 content: string
                 contextual_tools?: Record<string, any>
                 ui_context?: MaxContextShape
+                billing_context?: MaxBillingContext
                 conversation?: string | null
                 trace_id: string
             },

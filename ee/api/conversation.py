@@ -29,6 +29,7 @@ class MessageSerializer(serializers.Serializer):
     contextual_tools = serializers.DictField(required=False, child=serializers.JSONField())
     trace_id = serializers.UUIDField(required=True)
     ui_context = serializers.JSONField(required=False)
+    billing_context = serializers.JSONField(required=False)
 
     def validate(self, data):
         try:
@@ -102,6 +103,7 @@ class ConversationViewSet(TeamAndOrgViewSetMixin, ListModelMixin, RetrieveModelM
             is_new_conversation=not conversation_id,
             trace_id=serializer.validated_data["trace_id"],
             mode=AssistantMode.ASSISTANT,
+            billing_context=serializer.validated_data.get("billing_context"),
         )
         return StreamingHttpResponse(assistant.stream(), content_type="text/event-stream")
 

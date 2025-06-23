@@ -58,6 +58,7 @@ from posthog.schema import (
     AssistantMessage,
     FailureMessage,
     HumanMessage,
+    MaxBillingContext,
     ReasoningMessage,
     VisualizationMessage,
 )
@@ -107,6 +108,7 @@ class Assistant:
     _callback_handler: Optional[BaseCallbackHandler]
     _trace_id: Optional[str | UUID]
     _custom_update_ids: set[str]
+    _billing_context: Optional[MaxBillingContext]
 
     def __init__(
         self,
@@ -120,6 +122,7 @@ class Assistant:
         is_new_conversation: bool = False,
         trace_id: Optional[str | UUID] = None,
         tool_call_partial_state: Optional[AssistantState] = None,
+        billing_context: Optional[MaxBillingContext] = None,
     ):
         self._team = team
         self._contextual_tools = contextual_tools or {}
@@ -155,6 +158,7 @@ class Assistant:
         )
         self._trace_id = trace_id
         self._custom_update_ids = set()
+        self._billing_context = billing_context
 
     def stream(self):
         if SERVER_GATEWAY_INTERFACE == "ASGI":
@@ -262,6 +266,7 @@ class Assistant:
                 "distinct_id": self._user.distinct_id if self._user else None,
                 "contextual_tools": self._contextual_tools,
                 "team_id": self._team.id,
+                "billing_context": self._billing_context,
             },
         }
         return config
@@ -360,6 +365,8 @@ class Assistant:
                     return ReasoningMessage(content="Coming up with an insight")
                 if tool_call.name == "search_documentation":
                     return ReasoningMessage(content="Checking PostHog docs")
+                if tool_call.name == "retrieve_billing_information":
+                    return ReasoningMessage(content="Checking your billing data")
                 # This tool should be in CONTEXTUAL_TOOL_NAME_TO_TOOL, but it might not be in the rare case
                 # when the tool has been removed from the backend since the user's frontent was loaded
                 ToolClass = CONTEXTUAL_TOOL_NAME_TO_TOOL.get(tool_call.name)  # type: ignore
