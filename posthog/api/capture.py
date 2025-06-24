@@ -4,6 +4,7 @@ import re
 from random import random
 
 import structlog
+import requests
 import time
 from collections.abc import Iterator
 from datetime import datetime, timedelta, UTC
@@ -461,8 +462,61 @@ def get_csp_event(request):
     if error_response:
         return error_response
 
-    # Explicit mark for get_event pipeline to handle CSP reports on this flow
-    return get_event(request, csp_report=csp_report)
+    # handle cors request
+    if request.method == "OPTIONS":
+        return cors_response(request, JsonResponse({"status": 1}))
+
+    # obtain & validate token to pass to capture-rs
+    token = get_token(csp_report, request)
+    if not token:
+        return cors_response(
+            request,
+            generate_exception_response(
+                "capture",
+                "API key not provided. You can find your project API key in PostHog project settings.",
+                type="authentication_error",
+                code="missing_api_key",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            ),
+        )
+
+    try:
+        invalid_token_reason = _check_token_shape(token)
+    except Exception as e:
+        invalid_token_reason = "exception"
+        logger.warning(
+            "capture_token_shape_exception",
+            token=token,
+            reason="exception",
+            exception=e,
+        )
+
+    if invalid_token_reason:
+        TOKEN_SHAPE_INVALID_COUNTER.labels(reason=invalid_token_reason).inc()
+        logger.warning("capture_token_shape_invalid", token=token, reason=invalid_token_reason)
+        return cors_response(
+            request,
+            generate_exception_response(
+                "capture",
+                f"Provided API key is not valid: {invalid_token_reason}",
+                type="authentication_error",
+                code=invalid_token_reason,
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            ),
+        )
+
+    structlog.contextvars.bind_contextvars(token=token)
+    payload = csp_report | {
+        "api_key": token,
+        "timetstamp": timezone.now(),
+    }
+
+    # Pass CSP report on as an event to capture-rs
+    return requests.post(
+        request.build_absolute_uri("/i/v0/e/"),
+        json=payload,
+        timeout=5,
+    )
 
 
 @csrf_exempt
