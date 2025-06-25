@@ -472,7 +472,7 @@ def get_csp_event(request):
         return cors_response(
             request,
             generate_exception_response(
-                "capture",
+                "report",
                 "API key not provided. You can find your project API key in PostHog project settings.",
                 type="authentication_error",
                 code="missing_api_key",
@@ -485,7 +485,7 @@ def get_csp_event(request):
     except Exception as e:
         invalid_token_reason = "exception"
         logger.warning(
-            "capture_token_shape_exception",
+            "report_token_shape_exception",
             token=token,
             reason="exception",
             exception=e,
@@ -497,7 +497,7 @@ def get_csp_event(request):
         return cors_response(
             request,
             generate_exception_response(
-                "capture",
+                "report",
                 f"Provided API key is not valid: {invalid_token_reason}",
                 type="authentication_error",
                 code=invalid_token_reason,
@@ -506,12 +506,30 @@ def get_csp_event(request):
         )
 
     structlog.contextvars.bind_contextvars(token=token)
-    payload = csp_report | {
-        "api_key": token,
-        "timetstamp": timezone.now(),
-    }
 
-    # Pass CSP report on as an event to capture-rs
+    # associate the outgoing event batch with the caller's token
+    payload = None
+    if isinstance(csp_report, dict):
+        csp_report["api_token"] = token
+        payload = csp_report
+    elif isinstance(csp_report, list):
+        payload = {
+            "api_token": token,
+            "batch": csp_report,
+        }
+    else:
+        return cors_response(
+            request,
+            generate_exception_response(
+                "report",
+                "Invalid or empty CSP violation report payload",
+                type="invalid_csp_report_payload",
+                code="invalid_or_empty_payload",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            ),
+        )
+
+    # Pass CSP report on as an event or batch payload to capture-rs
     return requests.post(
         request.build_absolute_uri("/i/v0/e/"),
         json=payload,
