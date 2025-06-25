@@ -13661,11 +13661,14 @@
                 "settings": {
                     "additionalProperties": false,
                     "properties": {
+                        "active_destinations": {
+                            "type": "number"
+                        },
                         "autocapture_on": {
                             "type": "boolean"
                         }
                     },
-                    "required": ["autocapture_on"],
+                    "required": ["autocapture_on", "active_destinations"],
                     "type": "object"
                 },
                 "startup_program_label": {

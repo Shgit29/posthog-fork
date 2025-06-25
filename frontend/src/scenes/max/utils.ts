@@ -3,6 +3,7 @@ import { dayjs } from 'lib/dayjs'
 import { humanFriendlyDuration } from 'lib/utils'
 import { BillingUsageResponse } from 'scenes/billing/billingUsageLogic'
 import { isAddonVisible } from 'scenes/billing/utils'
+import { Destination } from 'scenes/pipeline/types'
 
 import {
     AssistantMessage,
@@ -152,6 +153,7 @@ export const billingToMaxContext = (
     billing: BillingType | null,
     featureFlags: Record<string, any>,
     currentTeam: TeamType,
+    destinations: Destination[],
     usageResponse?: BillingUsageResponse
 ): MaxBillingContext | null => {
     if (!billing) {
@@ -273,6 +275,7 @@ export const billingToMaxContext = (
         usage_history: usageResponse?.results,
         settings: {
             autocapture_on: !currentTeam.autocapture_opt_out,
+            active_destinations: destinations.length,
         },
     }
 }

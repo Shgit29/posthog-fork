@@ -9,6 +9,9 @@ import { dashboardLogic, RefreshStatus } from 'scenes/dashboard/dashboardLogic'
 import { insightLogic } from 'scenes/insights/insightLogic'
 import { insightSceneLogic } from 'scenes/insights/insightSceneLogic'
 import { organizationLogic } from 'scenes/organizationLogic'
+import { DESTINATION_TYPES } from 'scenes/pipeline/destinations/constants'
+import { pipelineDestinationsLogic } from 'scenes/pipeline/destinations/destinationsLogic'
+import { Destination } from 'scenes/pipeline/types'
 import { teamLogic } from 'scenes/teamLogic'
 
 import { DashboardFilter, HogQLVariable } from '~/queries/schema/schema-general'
@@ -68,6 +71,8 @@ export const maxContextLogic = kea<maxContextLogicType>([
             ['currentTeam'],
             featureFlagLogic,
             ['featureFlags'],
+            pipelineDestinationsLogic({ types: DESTINATION_TYPES }),
+            ['destinations'],
         ],
         actions: [
             router,
@@ -75,7 +80,7 @@ export const maxContextLogic = kea<maxContextLogicType>([
             billingLogic,
             ['loadBilling'],
             billingUsageLogic,
-            ['loadBillingUsage', 'setDateRange as billingUsageSetDateRange'],
+            ['loadBillingUsage', 'setDateRange as billingUsageSetDateRange', 'setFilters'],
         ],
     })),
     actions({
@@ -186,7 +191,7 @@ export const maxContextLogic = kea<maxContextLogicType>([
             // Load billing data
             actions.loadBilling()
 
-            // Set date range for last 30 days and load usage
+            // Set date range for last 30 days and load usage with weekly interval
             const endDate = new Date()
             endDate.setDate(endDate.getDate() - 1) // Yesterday as today's usage is not available yet
             const startDate = new Date()
@@ -197,6 +202,9 @@ export const maxContextLogic = kea<maxContextLogicType>([
                 endDate.toISOString().split('T')[0],
                 false
             )
+
+            // Set weekly interval for billing usage
+            actions.setFilters({ interval: 'week' }, false)
             actions.loadBillingUsage()
         },
         locationChanged: () => {
@@ -402,18 +410,26 @@ export const maxContextLogic = kea<maxContextLogicType>([
             },
         ],
         billingContext: [
-            (s: any) => [s.billing, s.billingUsageResponse, s.isAdminOrOwner, s.currentTeam, s.featureFlags],
+            (s: any) => [
+                s.billing,
+                s.billingUsageResponse,
+                s.isAdminOrOwner,
+                s.currentTeam,
+                s.featureFlags,
+                s.destinations,
+            ],
             (
                 billing: BillingType | null,
                 billingUsageResponse: any,
                 isAdminOrOwner: boolean,
                 currentTeam: TeamType,
-                featureFlags: Record<string, any>
+                featureFlags: Record<string, any>,
+                destinations: Destination[]
             ): MaxBillingContext | null => {
                 if (!isAdminOrOwner) {
                     return null
                 }
-                return billingToMaxContext(billing, billingUsageResponse, featureFlags, currentTeam)
+                return billingToMaxContext(billing, featureFlags, currentTeam, destinations, billingUsageResponse)
             },
         ],
         compiledContext: [

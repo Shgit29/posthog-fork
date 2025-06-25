@@ -27,7 +27,7 @@ export interface MaxAddonInfo {
     subscribed: boolean
     has_exceeded_limit: boolean
     current_usage: number
-    usage_limit?: number | null
+    free_usage_limit?: number | null
     percentage_usage?: number
     custom_limit_usd?: number | null
     next_period_custom_limit_usd?: number | null
@@ -90,6 +90,7 @@ export interface MaxBillingContext {
     // Settings
     settings: {
         autocapture_on: boolean
+        active_destinations: number
     }
 }
 

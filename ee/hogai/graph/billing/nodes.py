@@ -1,3 +1,4 @@
+from typing import Any
 from uuid import uuid4
 from ee.hogai.graph.base import AssistantNode
 from ee.hogai.graph.billing.prompts import BILLING_CONTEXT_PROMPT
@@ -6,6 +7,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableConfig
 
 from posthog.schema import AssistantToolCallMessage, MaxBillingContext
+from posthog.clickhouse.client import sync_execute
 
 
 class BillingNode(AssistantNode):
@@ -104,31 +106,140 @@ class BillingNode(AssistantNode):
             template_data["usage_history_table"] = usage_table
 
         # Add settings
-        template_data["settings"] = {"autocapture_on": billing_context.settings.autocapture_on}
+        template_data["settings"] = {
+            "autocapture_on": billing_context.settings.autocapture_on,
+            "active_destinations": billing_context.settings.active_destinations,
+        }
+
+        # Add top events by usage
+        top_events = self._get_top_events_by_usage()
+        if top_events:
+            template_data["top_events"] = top_events
 
         template = PromptTemplate.from_template(BILLING_CONTEXT_PROMPT, template_format="mustache")
         return template.format_prompt(**template_data).to_string()
 
     def _format_usage_history_table(self, usage_history) -> str:
-        """Format usage history timeseries data as a readable table."""
+        """Format usage history timeseries data as a concise table."""
         if not usage_history:
             return ""
 
-        # Create table header
-        table_lines = ["| Date | Usage |", "|------|-------|"]
+        # If only one breakdown, format as simple weekly table
+        if len(usage_history) == 1:
+            return self._format_simple_weekly_table(usage_history[0])
 
-        # Process each result in the usage history
-        for result in usage_history:
-            dates = result.get("dates", [])
-            data = result.get("data", [])
-            breakdown_value = result.get("breakdown_value", "")
+        # Multiple breakdowns - use horizontal compact format
+        return self._format_compact_weekly_breakdown_table(usage_history)
 
-            # If there's a breakdown value, include it in the header
-            if breakdown_value and len(usage_history) > 1:
-                table_lines.append(f"| **{breakdown_value}** | |")
+    def _format_simple_weekly_table(self, result) -> str:
+        """Format single breakdown as simple weekly table."""
+        dates = result.dates
+        data = result.data
 
-            # Add data rows
-            for date, usage in zip(dates, data):
+        if not dates or not data:
+            return ""
+
+        # Create table - data is already weekly
+        table_lines = ["| Week | Usage |", "|------|-------|"]
+        for date, usage in zip(dates, data):
+            # Convert date to week date range format
+            from datetime import datetime, timedelta
+
+            try:
+                date_obj = datetime.strptime(date, "%Y-%m-%d")
+                # Calculate the start of the week (Monday)
+                days_since_monday = date_obj.weekday()
+                week_start = date_obj - timedelta(days=days_since_monday)
+                week_end = week_start + timedelta(days=6)
+                week_range = f"{week_start.strftime('%b %d')} - {week_end.strftime('%b %d, %Y')}"
+                table_lines.append(f"| {week_range} | {usage:,} |")
+            except (ValueError, TypeError):
+                # Fallback to original date format if parsing fails
                 table_lines.append(f"| {date} | {usage:,} |")
 
         return "\n".join(table_lines)
+
+    def _format_compact_weekly_breakdown_table(self, usage_history) -> str:
+        """Format multiple breakdowns as compact weekly breakdown table."""
+        from datetime import datetime
+
+        # Create dynamic header with breakdown columns
+        breakdown_names = [result.breakdown_value or "Unknown" for result in usage_history]
+        header = "| Week | " + " | ".join(breakdown_names) + " |"
+        separator = "|------|" + "|".join(["-------"] * len(breakdown_names)) + "|"
+
+        table_lines = [header, separator]
+
+        # Get all unique weeks across all breakdowns
+        all_weeks = set()
+        breakdown_data = {}
+        week_date_mapping = {}  # Maps week_key to actual date range
+
+        for i, result in enumerate(usage_history):
+            breakdown_data[i] = {}
+            if result.dates and result.data:
+                for date, usage in zip(result.dates, result.data):
+                    try:
+                        date_obj = datetime.strptime(date, "%Y-%m-%d")
+                        # Calculate the start of the week (Monday)
+                        from datetime import timedelta
+
+                        days_since_monday = date_obj.weekday()
+                        week_start = date_obj - timedelta(days=days_since_monday)
+                        week_end = week_start + timedelta(days=6)
+                        week_key = week_start.strftime("%Y-%m-%d")  # Use start date as key
+                        week_range = f"{week_start.strftime('%b %d')} - {week_end.strftime('%b %d')}"
+
+                        all_weeks.add(week_key)
+                        week_date_mapping[week_key] = week_range
+                        breakdown_data[i][week_key] = float(usage) if usage is not None else 0
+                    except (ValueError, TypeError):
+                        # Fallback to original date format if parsing fails
+                        week_key = date
+                        all_weeks.add(week_key)
+                        week_date_mapping[week_key] = date
+                        breakdown_data[i][week_key] = float(usage) if usage is not None else 0
+
+        # Sort weeks and show most recent 4-6 weeks
+        sorted_weeks = sorted(all_weeks)[-6:] if len(all_weeks) > 6 else sorted(all_weeks)
+
+        # Create rows for each week
+        for week in sorted_weeks:
+            week_totals = []
+            for i in range(len(usage_history)):
+                total = breakdown_data[i].get(week, 0)
+                if total >= 1000:
+                    week_totals.append(f"{total:,.0f}")
+                else:
+                    week_totals.append(f"{total:.0f}")
+
+            week_display = week_date_mapping.get(week, week)
+            week_row = f"| {week_display} | " + " | ".join(week_totals) + " |"
+            table_lines.append(week_row)
+
+        return "\n".join(table_lines)
+
+    def _get_top_events_by_usage(self) -> list[dict[str, Any]]:
+        """Get top 20 events by usage over the last 30 days."""
+        try:
+            query = """
+                SELECT
+                    event,
+                    count() as count
+                FROM events
+                WHERE
+                    team_id = %(team_id)s
+                    AND timestamp >= now() - INTERVAL 30 DAY
+                GROUP BY
+                    event
+                ORDER BY
+                    count DESC
+                LIMIT 20
+            """
+
+            results = sync_execute(query, {"team_id": self._team.id})
+
+            return [{"event": row[0], "count": int(row[1]), "formatted_count": f"{int(row[1]):,}"} for row in results]
+        except Exception:
+            # If query fails, return empty list
+            return []

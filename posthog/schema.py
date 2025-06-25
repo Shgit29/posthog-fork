@@ -1531,6 +1531,7 @@ class Settings1(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
+    active_destinations: float
     autocapture_on: bool
 
 
