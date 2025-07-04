@@ -69,7 +69,11 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
         }
 
         // New messages have been added since we last updated the thread
-        if (!values.streamingActive && props.conversation.messages.length > values.threadMessageCount) {
+        if (
+            !values.streamingActive &&
+            props.conversation.messages.length > values.threadMessageCount &&
+            values.threadRaw.length === 0
+        ) {
             actions.setThread(
                 props.conversation.messages.map((message) => ({
                     ...message,
@@ -110,6 +114,14 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
 
     actions({
         askMax: (prompt: string, generationAttempt: number = 0) => ({ prompt, generationAttempt }),
+        reconnectToStream: true,
+        streamConversation: (streamData: {
+            content?: string
+            conversation?: string
+            contextual_tools?: Record<string, any>
+            ui_context?: any
+            trace_id?: string
+        }) => ({ streamData }),
         stopGeneration: true,
         completeThreadGeneration: true,
         addMessage: (message: ThreadMessage) => ({ message }),
@@ -166,6 +178,8 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             false,
             {
                 askMax: () => true,
+                reconnectToStream: () => true,
+                streamConversation: () => true,
                 completeThreadGeneration: () => false,
             },
         ],
@@ -181,10 +195,8 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             }
             // Clear the question
             actions.setQuestion('')
-            // Set active streaming threads, so we know how many are running
-            actions.setActiveStreamingThreads(1)
 
-            // For a new conversations, set the temporary conversation ID, which will be replaced with the actual conversation ID once the first message is generated
+            // For a new conversations, set the frontend conversation ID
             if (!values.conversation) {
                 actions.setConversationId(values.conversationId)
             } else {
@@ -216,106 +228,13 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                 const traceId = uuid()
                 actions.setTraceId(traceId)
 
-                cache.generationController = new AbortController()
-
-                const response = await api.conversations.stream(
-                    {
-                        content: prompt,
-                        contextual_tools: Object.fromEntries(values.tools.map((tool) => [tool.name, tool.context])),
-                        ui_context: values.compiledContext || undefined,
-                        conversation: values.conversation?.id,
-                        trace_id: traceId,
-                    },
-                    {
-                        signal: cache.generationController.signal,
-                    }
-                )
-                const reader = response.body?.getReader()
-
-                if (!reader) {
-                    return
-                }
-
-                const decoder = new TextDecoder()
-
-                const parser = createParser({
-                    onEvent: ({ data, event }) => {
-                        // A Conversation object is only received when the conversation is new
-                        if (event === AssistantEventType.Conversation) {
-                            const parsedResponse = parseResponse<Conversation>(data)
-                            if (!parsedResponse) {
-                                return
-                            }
-
-                            const conversationWithTitle = {
-                                ...parsedResponse,
-                                title: parsedResponse.title || 'New chat',
-                            }
-
-                            // Set the mapping of conversation ID and thread ID, so we can get back to this thread later.
-                            if (!values.threadKeys[props.conversationId]) {
-                                actions.setThreadKey(parsedResponse.id, props.conversationId)
-                            }
-
-                            // Update the local cache
-                            actions.setConversation(conversationWithTitle)
-                            // Update the global conversation cache
-                            actions.updateGlobalConversationCache(conversationWithTitle)
-                            // Set the current conversation ID
-                            actions.setConversationId(parsedResponse.id)
-                        } else if (event === AssistantEventType.Message) {
-                            const parsedResponse = parseResponse<RootAssistantMessage>(data)
-                            if (!parsedResponse) {
-                                return
-                            }
-
-                            if (isHumanMessage(parsedResponse)) {
-                                actions.replaceMessage(values.threadRaw.length - 1, {
-                                    ...parsedResponse,
-                                    status: 'completed',
-                                })
-                            } else if (isAssistantToolCallMessage(parsedResponse)) {
-                                for (const [toolName, toolResult] of Object.entries(parsedResponse.ui_payload)) {
-                                    values.toolMap[toolName]?.callback(toolResult)
-                                }
-                                actions.addMessage({
-                                    ...parsedResponse,
-                                    status: 'completed',
-                                })
-                            } else if (
-                                values.threadRaw[values.threadRaw.length - 1]?.status === 'completed' ||
-                                values.threadRaw.length === 0
-                            ) {
-                                actions.addMessage({
-                                    ...parsedResponse,
-                                    status: !parsedResponse.id ? 'loading' : 'completed',
-                                })
-                            } else if (parsedResponse) {
-                                actions.replaceMessage(values.threadRaw.length - 1, {
-                                    ...parsedResponse,
-                                    status: !parsedResponse.id ? 'loading' : 'completed',
-                                })
-                            }
-                        } else if (event === AssistantEventType.Status) {
-                            const parsedResponse = parseResponse<AssistantGenerationStatusEvent>(data)
-                            if (!parsedResponse) {
-                                return
-                            }
-
-                            if (parsedResponse.type === AssistantGenerationStatusType.GenerationError) {
-                                actions.setMessageStatus(values.threadRaw.length - 1, 'error')
-                            }
-                        }
-                    },
+                actions.streamConversation({
+                    content: prompt,
+                    contextual_tools: Object.fromEntries(values.tools.map((tool) => [tool.name, tool.context])),
+                    ui_context: values.compiledContext || undefined,
+                    conversation: values.conversation?.id || values.conversationId,
+                    trace_id: traceId,
                 })
-
-                while (true) {
-                    const { done, value } = await reader.read()
-                    parser.feed(decoder.decode(value))
-                    if (done) {
-                        break
-                    }
-                }
             } catch (e) {
                 if (!(e instanceof DOMException) || e.name !== 'AbortError') {
                     const relevantErrorMessage = { ...FAILURE_MESSAGE, id: uuid() } // Generic message by default
@@ -351,6 +270,129 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                     }
                 }
             }
+        },
+
+        streamConversation: async ({ streamData }) => {
+            // Set active streaming threads, so we know streaming is active
+            actions.setActiveStreamingThreads(1)
+
+            try {
+                cache.generationController = new AbortController()
+
+                // Ensure we have valid data for the API call
+                const apiData: any = { ...streamData }
+
+                // For reconnection, we only need conversation ID
+                if (!streamData.content && streamData.conversation) {
+                    // Remove all other fields to ensure clean reconnection call
+                    delete apiData.contextual_tools
+                    delete apiData.ui_context
+                    delete apiData.trace_id
+                }
+
+                const response = await api.conversations.stream(apiData, {
+                    signal: cache.generationController.signal,
+                })
+
+                const reader = response.body?.getReader()
+                if (!reader) {
+                    return
+                }
+
+                const decoder = new TextDecoder()
+                const parser = createParser({
+                    onEvent: ({ data, event }) => {
+                        if (event === AssistantEventType.Conversation) {
+                            const parsedResponse = parseResponse<Conversation>(data)
+                            if (!parsedResponse) {
+                                return
+                            }
+                            const conversationWithTitle = {
+                                ...parsedResponse,
+                                title: parsedResponse.title || 'New chat',
+                            }
+
+                            // Set the mapping of conversation ID and thread ID for new conversations
+                            if (!streamData.content && !values.threadKeys[props.conversationId]) {
+                                actions.setThreadKey(parsedResponse.id, props.conversationId)
+                            }
+
+                            actions.setConversation(conversationWithTitle)
+                            actions.updateGlobalConversationCache(conversationWithTitle)
+
+                            // For new conversations, the frontend ID should match the backend ID
+                            if (!streamData.conversation) {
+                                // Backend should use the frontend-provided ID, so this should match
+                                actions.setConversationId(parsedResponse.id)
+                            }
+                        } else if (event === AssistantEventType.Message) {
+                            const parsedResponse = parseResponse<RootAssistantMessage>(data)
+                            if (!parsedResponse) {
+                                return
+                            }
+
+                            if (isHumanMessage(parsedResponse)) {
+                                actions.replaceMessage(values.threadRaw.length - 1, {
+                                    ...parsedResponse,
+                                    status: 'completed',
+                                })
+                            } else if (isAssistantToolCallMessage(parsedResponse)) {
+                                for (const [toolName, toolResult] of Object.entries(parsedResponse.ui_payload)) {
+                                    values.toolMap[toolName]?.callback(toolResult)
+                                }
+                                actions.addMessage({
+                                    ...parsedResponse,
+                                    status: 'completed',
+                                })
+                            } else if (parsedResponse.type === AssistantMessageType.Failure) {
+                                // Handle failure messages - reset streaming state
+                                actions.addMessage({
+                                    ...parsedResponse,
+                                    status: 'completed',
+                                })
+                                actions.setActiveStreamingThreads(-1)
+                            } else if (
+                                values.threadRaw[values.threadRaw.length - 1]?.status === 'completed' ||
+                                values.threadRaw.length === 0
+                            ) {
+                                actions.addMessage({
+                                    ...parsedResponse,
+                                    status: !parsedResponse.id ? 'loading' : 'completed',
+                                })
+                            } else if (parsedResponse) {
+                                actions.replaceMessage(values.threadRaw.length - 1, {
+                                    ...parsedResponse,
+                                    status: !parsedResponse.id ? 'loading' : 'completed',
+                                })
+                            }
+                        } else if (event === AssistantEventType.Status) {
+                            const parsedResponse = parseResponse<AssistantGenerationStatusEvent>(data)
+                            if (!parsedResponse) {
+                                return
+                            }
+
+                            if (parsedResponse.type === AssistantGenerationStatusType.GenerationError) {
+                                actions.setMessageStatus(values.threadRaw.length - 1, 'error')
+                                actions.setActiveStreamingThreads(-1)
+                            }
+                        }
+                    },
+                })
+
+                while (true) {
+                    const { done, value } = await reader.read()
+                    parser.feed(decoder.decode(value))
+                    if (done) {
+                        break
+                    }
+                }
+            } catch (e) {
+                if (!(e instanceof DOMException) || e.name !== 'AbortError') {
+                    console.error('Stream conversation failed:', e)
+                    actions.setActiveStreamingThreads(-1)
+                    throw e // Re-throw for askMax error handling
+                }
+            }
 
             actions.completeThreadGeneration()
             actions.setActiveStreamingThreads(-1)
@@ -369,6 +411,19 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             } catch (e: any) {
                 lemonToast.error(e?.data?.detail || 'Failed to cancel the generation.')
             }
+        },
+
+        reconnectToStream: () => {
+            if (!props.conversationId) {
+                return
+            }
+
+            // Historical messages should already be loaded by propsChanged
+            // Just start the stream reconnection
+            actions.streamConversation({
+                conversation: props.conversationId,
+                // No content for reconnection
+            })
         },
 
         retryLastMessage: () => {

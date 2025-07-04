@@ -3516,7 +3516,7 @@ const api = {
     conversations: {
         async stream(
             data: {
-                content: string
+                content?: string
                 contextual_tools?: Record<string, any>
                 ui_context?: MaxContextShape
                 conversation?: string | null

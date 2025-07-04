@@ -19,6 +19,7 @@ import { Conversation, ConversationDetail, ConversationStatus, SidePanelTab } fr
 import { maxContextLogic } from './maxContextLogic'
 import { maxGlobalLogic } from './maxGlobalLogic'
 import type { maxLogicType } from './maxLogicType'
+import { maxThreadLogic } from './maxThreadLogic'
 
 export type MessageStatus = 'loading' | 'completed' | 'error'
 
@@ -92,6 +93,11 @@ export const maxLogic = kea<maxLogicType>([
          * Prepend a conversation to the conversation history or update it in place.
          */
         prependOrReplaceConversation: (conversation: ConversationDetail | Conversation) => ({ conversation }),
+
+        /**
+         * Reconnect to an in-progress conversation stream.
+         */
+        reconnectToInProgressConversation: (conversation: ConversationDetail) => ({ conversation }),
     }),
 
     defaults({
@@ -123,12 +129,11 @@ export const maxLogic = kea<maxLogicType>([
             },
         ],
 
-        // The shadow ID for the temporary conversations that have started streaming, but didn't receive a conversation object yet.
-        tempConversationId: [
-            generateTempId(),
+        // The frontend-generated UUID for new conversations
+        frontendConversationId: [
+            uuid(),
             {
-                startNewConversation: () => generateTempId(),
-                setConversationId: () => generateTempId(),
+                startNewConversation: () => uuid(),
             },
         ],
 
@@ -201,7 +206,7 @@ export const maxLogic = kea<maxLogicType>([
         conversation: [
             (s) => [s.conversationHistory, s.conversationId],
             (conversationHistory, conversationId) => {
-                if (conversationId && !isTempId(conversationId)) {
+                if (conversationId) {
                     return conversationHistory.find((c) => c.id === conversationId) ?? null
                 }
                 return null
@@ -247,13 +252,7 @@ export const maxLogic = kea<maxLogicType>([
         conversationLoading: [
             (s) => [s.conversationHistory, s.conversationHistoryLoading, s.conversationId, s.conversation],
             (conversationHistory, conversationHistoryLoading, conversationId, conversation) => {
-                return (
-                    !conversationHistory.length &&
-                    conversationHistoryLoading &&
-                    !!conversationId &&
-                    !isTempId(conversationId) &&
-                    !conversation
-                )
+                return !conversationHistory.length && conversationHistoryLoading && !!conversationId && !conversation
             },
         ],
 
@@ -274,13 +273,8 @@ export const maxLogic = kea<maxLogicType>([
                 }
 
                 // Existing conversation or the first generation is in progress
-                if (conversation || isTempId(conversationId)) {
+                if (conversation || conversationId) {
                     return conversation?.title ?? 'New chat'
-                }
-
-                // Conversation is loading
-                if (conversationId) {
-                    return null
                 }
 
                 return 'Max AI'
@@ -288,12 +282,12 @@ export const maxLogic = kea<maxLogicType>([
         ],
 
         threadLogicKey: [
-            (s) => [s.threadKeys, s.conversationId, s.tempConversationId],
-            (threadKeys, conversationId, tempConversationId) => {
+            (s) => [s.threadKeys, s.conversationId, s.frontendConversationId],
+            (threadKeys, conversationId, frontendConversationId) => {
                 if (conversationId) {
-                    return threadKeys[conversationId] || conversationId
+                    return threadKeys[conversationId] || frontendConversationId
                 }
-                return tempConversationId
+                return frontendConversationId
             },
         ],
     }),
@@ -319,12 +313,7 @@ export const maxLogic = kea<maxLogicType>([
             // the current chat is a temp chat
             // we have explicitly marked
             // we're in an autorun conversation
-            if (
-                !values.conversationId ||
-                values.autoRun ||
-                isTempId(values.conversationId) ||
-                payload?.doNotUpdateCurrentThread
-            ) {
+            if (!values.conversationId || values.autoRun || payload?.doNotUpdateCurrentThread) {
                 return
             }
 
@@ -334,9 +323,16 @@ export const maxLogic = kea<maxLogicType>([
             // after the history has been loaded.
             if (conversation) {
                 actions.scrollThreadToBottom('instant')
-                if (conversation.status === ConversationStatus.InProgress) {
-                    // If the conversation is in progress, poll the conversation status.
-                    actions.pollConversation(values.conversationId)
+                if (
+                    conversation.status === ConversationStatus.InProgress &&
+                    conversation.messages &&
+                    conversation.messages.length > 0
+                ) {
+                    // Only reconnect for existing conversations with message history
+                    // New conversations should use the normal askMax flow, not reconnection
+                    setTimeout(() => {
+                        actions.reconnectToInProgressConversation(conversation)
+                    }, 0)
                 }
             } else {
                 // If the conversation is not found, retrieve once the conversation status and reset if 404.
@@ -409,6 +405,19 @@ export const maxLogic = kea<maxLogicType>([
         startNewConversation: () => {
             actions.resetContext()
             actions.focusInput()
+        },
+
+        reconnectToInProgressConversation: ({ conversation }) => {
+            const threadKey = values.threadKeys[conversation.id] || conversation.id
+
+            const logic = maxThreadLogic.findMounted({
+                conversationId: threadKey,
+                conversation: conversation,
+            })
+
+            if (logic) {
+                logic.actions.reconnectToStream()
+            }
         },
     })),
 
@@ -624,12 +633,4 @@ export function mergeConversations(
         ...newObj,
         messages: oldObj?.messages ?? [],
     }
-}
-
-export function generateTempId(): string {
-    return `new-${uuid()}`
-}
-
-export function isTempId(id?: string | null): boolean {
-    return id?.startsWith('new-') ?? false
 }
