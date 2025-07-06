@@ -131,10 +131,6 @@ class RedisStream:
                         if b"data" in fields:
                             data = self.safe_decode(fields[b"data"], "data")
                             if data:
-                                logger.info(
-                                    f"Yielding chunk from Redis at {asyncio.get_event_loop().time()}",
-                                    conversation_id=str(self.conversation_id),
-                                )
                                 yield data
 
             except redis_exceptions.ConnectionError:

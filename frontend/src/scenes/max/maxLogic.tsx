@@ -285,7 +285,7 @@ export const maxLogic = kea<maxLogicType>([
             (s) => [s.threadKeys, s.conversationId, s.frontendConversationId],
             (threadKeys, conversationId, frontendConversationId) => {
                 if (conversationId) {
-                    return threadKeys[conversationId] || frontendConversationId
+                    return threadKeys[conversationId] || conversationId
                 }
                 return frontendConversationId
             },
@@ -470,10 +470,24 @@ export const maxLogic = kea<maxLogicType>([
         },
     })),
 
-    actionToUrl(() => ({
+    actionToUrl(({ values }) => ({
         startNewConversation: () => {
             const { chat, ...params } = decodeParams(router.values.location.search, '?')
             return [router.values.location.pathname, params, router.values.location.hash]
+        },
+        setConversationId: (payload: Record<string, any>) => {
+            const { conversationId } = payload
+            // Only set the URL parameter if this is a new conversation (using frontendConversationId)
+            if (conversationId && conversationId === values.frontendConversationId) {
+                const params = decodeParams(router.values.location.search, '?')
+                return [
+                    router.values.location.pathname,
+                    { ...params, chat: conversationId },
+                    router.values.location.hash,
+                ]
+            }
+            // Return undefined to not update URL for existing conversations
+            return undefined
         },
     })),
 
