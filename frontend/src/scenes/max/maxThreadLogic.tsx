@@ -37,6 +37,7 @@ import { maxGlobalLogic } from './maxGlobalLogic'
 import { maxLogic } from './maxLogic'
 import type { maxThreadLogicType } from './maxThreadLogicType'
 import { isAssistantMessage, isAssistantToolCallMessage, isHumanMessage, isReasoningMessage } from './utils'
+import { breadcrumbsLogic } from '~/layout/navigation/Breadcrumbs/breadcrumbsLogic'
 
 export type MessageStatus = 'loading' | 'completed' | 'error'
 
@@ -113,14 +114,14 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
     })),
 
     actions({
-        askMax: (prompt: string, generationAttempt: number = 0) => ({ prompt, generationAttempt }),
+        // null prompt means resuming streaming or continuing previous generation
+        askMax: (prompt: string | null, generationAttempt: number = 0) => ({ prompt, generationAttempt }),
         reconnectToStream: true,
         streamConversation: (streamData: {
-            content?: string
+            content: string | null
             conversation?: string
             contextual_tools?: Record<string, any>
             ui_context?: any
-            trace_id?: string
         }) => ({ streamData }),
         stopGeneration: true,
         completeThreadGeneration: true,
@@ -211,7 +212,7 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                 actions.updateGlobalConversationCache(updatedConversation)
             }
 
-            if (generationAttempt === 0) {
+            if (generationAttempt === 0 && prompt) {
                 const message: ThreadMessage = {
                     type: AssistantMessageType.Human,
                     content: prompt,
@@ -224,16 +225,11 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             }
 
             try {
-                // Generate a trace ID for the conversation run
-                const traceId = uuid()
-                actions.setTraceId(traceId)
-
                 actions.streamConversation({
                     content: prompt,
                     contextual_tools: Object.fromEntries(values.tools.map((tool) => [tool.name, tool.context])),
                     ui_context: values.compiledContext || undefined,
                     conversation: values.conversation?.id || values.conversationId,
-                    trace_id: traceId,
                 })
             } catch (e) {
                 if (!(e instanceof DOMException) || e.name !== 'AbortError') {
@@ -287,8 +283,12 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                     // Remove all other fields to ensure clean reconnection call
                     delete apiData.contextual_tools
                     delete apiData.ui_context
-                    delete apiData.trace_id
                 }
+
+                // Generate a trace ID for the conversation run
+                const traceId = uuid()
+                actions.setTraceId(traceId)
+                apiData.trace_id = traceId
 
                 const response = await api.conversations.stream(apiData, {
                     signal: cache.generationController.signal,
@@ -301,7 +301,8 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
 
                 const decoder = new TextDecoder()
                 const parser = createParser({
-                    onEvent: ({ data, event }) => {
+                    onEvent: async ({ data, event }) => {
+                        // A Conversation object is only received when the conversation is new
                         if (event === AssistantEventType.Conversation) {
                             const parsedResponse = parseResponse<Conversation>(data)
                             if (!parsedResponse) {
@@ -338,7 +339,16 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                                 })
                             } else if (isAssistantToolCallMessage(parsedResponse)) {
                                 for (const [toolName, toolResult] of Object.entries(parsedResponse.ui_payload)) {
-                                    values.toolMap[toolName]?.callback(toolResult)
+                                    // Empty message in askMax effectively means "just resume generation with current context"
+                                    await values.toolMap[toolName]?.callback(toolResult)
+                                    // The `navigate` tool is the only one doing client-side formatting currently
+                                    if (toolName === 'navigate') {
+                                        actions.askMax(null) // Continue generation
+                                        parsedResponse.content = parsedResponse.content.replace(
+                                            toolResult.page_key,
+                                            breadcrumbsLogic.values.sceneBreadcrumbsDisplayString
+                                        )
+                                    }
                                 }
                                 actions.addMessage({
                                     ...parsedResponse,
@@ -422,7 +432,7 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             // Just start the stream reconnection
             actions.streamConversation({
                 conversation: props.conversationId,
-                // No content for reconnection
+                content: null,
             })
         },
 

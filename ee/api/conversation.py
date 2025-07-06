@@ -15,39 +15,40 @@ from ee.hogai.stream.conversation_stream import ConversationStreamManager
 from ee.hogai.graph.graph import AssistantGraph
 from ee.models.assistant import Conversation
 from posthog.api.routing import TeamAndOrgViewSetMixin
-from posthog.exceptions import Conflict
 from posthog.models.user import User
 from posthog.rate_limit import AIBurstRateThrottle, AISustainedRateThrottle
 from posthog.schema import HumanMessage
 from posthog.utils import get_instance_region
 
-
 logger = structlog.get_logger(__name__)
 
 
 class MessageSerializer(serializers.Serializer):
-    content = serializers.CharField(required=False, max_length=40000)  ## roughly 10k tokens
+    content = serializers.CharField(
+        required=True,
+        allow_null=True,  # Null content means we're continuing previous generation or resuming streaming
+        max_length=40000,  # Roughly 10k tokens
+    )
     conversation = serializers.UUIDField(
         required=True
     )  # this either retrieves an existing conversation or creates a new one
     contextual_tools = serializers.DictField(required=False, child=serializers.JSONField())
-    trace_id = serializers.UUIDField(required=False)  # Only required for new messages
     ui_context = serializers.JSONField(required=False)
+    trace_id = serializers.UUIDField(required=True)
 
     def validate(self, data):
-        # If content is provided, this is a new message - validate and create HumanMessage
-        if "content" in data:
-            if "trace_id" not in data:
-                raise serializers.ValidationError("trace_id is required when sending a message.")
+        if data["content"] is not None:
             try:
-                message_data = {"content": data["content"]}
-                if "ui_context" in data:
-                    message_data["ui_context"] = data["ui_context"]
-                message = HumanMessage.model_validate(message_data)
-                data["message"] = message
+                message = HumanMessage.model_validate(
+                    {"content": data["content"], "ui_context": data.get("ui_context")}
+                )
             except pydantic.ValidationError:
                 raise serializers.ValidationError("Invalid message content.")
-
+            data["message"] = message
+        else:
+            # NOTE: If content is empty, it means we're resuming streaming or continuing generation with only the contextual_tools potentially different
+            # Because we intentionally don't add a HumanMessage, we are NOT updating ui_context here
+            data["message"] = None
         return data
 
 
@@ -121,22 +122,11 @@ class ConversationViewSet(TeamAndOrgViewSetMixin, ListModelMixin, RetrieveModelM
 
         stream_manager = ConversationStreamManager(conversation, self.team.id)
 
-        # If this is a streaming request (no new message)
-        if not has_message:
-            # If conversation is idle (completed), return serialized conversation
-            if is_idle:
-                serializer = ConversationSerializer(conversation)
-                return Response(serializer.data)
-            # Otherwise, stream from Redis
+        # If this is a streaming request
+        if not has_message and not is_idle:
             return StreamingHttpResponse(stream_manager.stream_conversation(), content_type="text/event-stream")
 
-        # Check if there's already an active workflow for this conversation
-        if not is_idle:
-            raise Conflict(
-                "Conversation is currently being processed. Please wait for completion before sending new messages."
-            )
-
-        # Otherwise, process the new message and stream the response
+        # Otherwise, process the new message (new generation) or resume generation
         return StreamingHttpResponse(
             stream_manager.start_workflow_and_stream(cast(User, request.user).id, serializer.validated_data),
             content_type="text/event-stream",

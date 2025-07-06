@@ -8,6 +8,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 from ee.hogai.assistant import Assistant
+from ee.hogai.utils.sse import AssistantSSESerializer
 from ee.hogai.utils.types import AssistantMode
 from ee.models import Conversation
 from posthog.models import Team, User
@@ -27,7 +28,7 @@ class ConversationInputs:
     team_id: int
     user_id: int
     conversation_id: UUID
-    message: dict[str, Any]
+    message: Optional[dict[str, Any]] = None
     contextual_tools: Optional[dict[str, Any]] = None
     is_new_conversation: bool = False
     trace_id: Optional[str] = None
@@ -78,7 +79,7 @@ async def process_conversation_activity(inputs: ConversationInputs) -> None:
     except Conversation.DoesNotExist:
         raise ValueError(f"Conversation {inputs.conversation_id} not found")
 
-    human_message = HumanMessage.model_validate(inputs.message)
+    human_message = HumanMessage.model_validate(inputs.message) if inputs.message else None
 
     assistant = Assistant(
         team,
@@ -101,13 +102,14 @@ async def process_conversation_activity(inputs: ConversationInputs) -> None:
     try:
         chunk_count = 0
 
-        async for chunk in assistant._astream():
+        serializer = AssistantSSESerializer()
+        async for chunk in assistant.astream():
             chunk_count += 1
 
             # Add chunk to Redis stream immediately
             await redis_client.xadd(
                 stream_key,
-                {"data": chunk, "timestamp": get_timestamp_ms()},
+                {"data": serializer.dumps(chunk), "timestamp": get_timestamp_ms()},
                 maxlen=REDIS_STREAM_MAX_LENGTH,
                 approximate=True,
             )

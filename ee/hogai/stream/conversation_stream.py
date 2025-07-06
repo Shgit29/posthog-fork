@@ -47,7 +47,7 @@ class ConversationStreamManager:
                 team_id=self.team_id,
                 user_id=user_id,
                 conversation_id=self.conversation.id,
-                message=validated_data["message"].model_dump(),
+                message=validated_data["message"].model_dump() if validated_data["message"] else None,
                 contextual_tools=validated_data.get("contextual_tools"),
                 is_new_conversation=not validated_data.get("conversation"),
                 trace_id=str(validated_data["trace_id"]),
