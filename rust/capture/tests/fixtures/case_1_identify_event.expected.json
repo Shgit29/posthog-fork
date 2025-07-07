@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "018a981f-4b35-7c66-825e-8b0eeae65714",
+    "distinct_id": "pWAkITyQ3CN7332UqQxnH6p3FV8VJd7pY647EdNkxWc",
+    "ip": "127.0.0.1",
+    "site_url": "http://localhost:8000",
+    "data": "{\"uuid\": \"018a981f-4b35-7c66-825e-8b0eeae65714\", \"event\": \"$identify\", \"properties\": {\"$os\": \"Mac OS X\", \"$os_version\": \"10.15.0\", \"$browser\": \"Firefox\", \"$device_type\": \"Desktop\", \"$current_url\": \"http://localhost:8000/\", \"$host\": \"localhost:8000\", \"$pathname\": \"/\", \"$browser_version\": 117, \"$browser_language\": \"en-US\", \"$screen_height\": 1052, \"$screen_width\": 1620, \"$viewport_height\": 911, \"$viewport_width\": 1548, \"$lib\": \"web\", \"$lib_version\": \"1.78.5\", \"$insert_id\": \"40pt1ucpk746ilep\", \"$time\": 1694769302.325, \"distinct_id\": \"pWAkITyQ3CN7332UqQxnH6p3FV8VJd7pY647EdNkxWc\", \"$device_id\": \"018a981f-4b2d-78ae-947b-bedbaa02a0f4\", \"$user_id\": \"pWAkITyQ3CN7332UqQxnH6p3FV8VJd7pY647EdNkxWc\", \"$referrer\": \"$direct\", \"$referring_domain\": \"$direct\", \"$anon_distinct_id\": \"018a981f-4b2d-78ae-947b-bedbaa02a0f4\", \"token\": \"phc_qgUFp5wz2BjC4RsFjMGpQ3PGDrsi6Q0CG0CP4NAac0I\", \"$session_id\": \"018a981f-4b2e-7bd3-bb30-6617bf488869\", \"$window_id\": \"018a981f-4b2e-7bd3-bb30-661810fed65f\"}, \"$set\": {}, \"$set_once\": {}, \"timestamp\": \"2023-09-15T09:15:02.325Z\"}",
+    "now": "2023-09-15T09:15:02.328551+00:00",
+    "sent_at": "2023-09-15T09:15:02.325000+00:00",
+    "token": "phc_qgUFp5wz2BjC4RsFjMGpQ3PGDrsi6Q0CG0CP4NAac0I"
+  }
+]

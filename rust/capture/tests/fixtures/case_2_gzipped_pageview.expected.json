@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "018a981f-4b2f-791a-9eb1-67ae5b9ecf84",
+    "distinct_id": "test-user-123",
+    "ip": "127.0.0.1",
+    "site_url": "http://localhost:8000",
+    "data": "{\"uuid\": \"018a981f-4b2f-791a-9eb1-67ae5b9ecf84\", \"event\": \"$pageview\", \"properties\": {\"$current_url\": \"http://localhost:8000/\", \"$lib\": \"web\", \"$lib_version\": \"1.78.5\", \"distinct_id\": \"test-user-123\", \"token\": \"phc_test_token\"}, \"timestamp\": \"2023-09-15T09:15:02.319Z\"}",
+    "now": "2023-09-15T09:15:02.322717+00:00",
+    "sent_at": "2023-09-15T09:15:02.319000+00:00",
+    "token": "phc_test_token"
+  }
+]

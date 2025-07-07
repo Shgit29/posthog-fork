@@ -1,0 +1,10 @@
+{
+  "title": "gzipped pageview event",
+  "path": "/e/?compression=gzip&ip=1&_=1694769302319&ver=1.78.5",
+  "method": "POST",
+  "content_encoding": "gzip",
+  "content_type": "text/plain",
+  "ip": "127.0.0.1",
+  "now": "2023-09-15T09:15:02.322717+00:00",
+  "historical_migration": false
+}

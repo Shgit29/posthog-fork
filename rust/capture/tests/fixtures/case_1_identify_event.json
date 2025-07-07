@@ -1,0 +1,10 @@
+{
+  "title": "posthog-js identify event",
+  "path": "/e/?ip=1&_=1694769302325&ver=1.78.5",
+  "method": "POST",
+  "content_encoding": "",
+  "content_type": "application/x-www-form-urlencoded",
+  "ip": "127.0.0.1",
+  "now": "2023-09-15T09:15:02.328551+00:00",
+  "historical_migration": false
+}
