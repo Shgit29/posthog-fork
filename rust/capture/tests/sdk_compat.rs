@@ -1,4 +1,4 @@
-use assert_json_diff::assert_json_matches_no_panic;
+use assert_json_diff::assert_json_include;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use axum_test_helper::TestClient;
@@ -99,6 +99,8 @@ fn prepare_capture_payload(
     Ok(req)
 }
 
+// TODO(eli): Compare Vec<ProcessedEvent> from MemorySink to Vec<Value> (from .expected file)
+//            and use assert_json_include(...) so we only compare values of interest from .expected
 fn load_test_fixture(case_name: &str) -> anyhow::Result<(TestMetadata, Vec<u8>, Vec<Value>)> {
     let fixtures_dir = Path::new("tests/fixtures");
 
