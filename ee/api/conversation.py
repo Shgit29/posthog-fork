@@ -103,8 +103,9 @@ class ConversationViewSet(TeamAndOrgViewSetMixin, ListModelMixin, RetrieveModelM
         serializer.is_valid(raise_exception=True)
         conversation_id = serializer.validated_data.get("conversation")
 
-        has_message = "message" in serializer.validated_data
+        has_message = serializer.validated_data.get("content") is not None
 
+        is_new_conversation = False
         try:
             self.kwargs[self.lookup_url_kwarg] = conversation_id
             conversation = self.get_object()
@@ -117,6 +118,7 @@ class ConversationViewSet(TeamAndOrgViewSetMixin, ListModelMixin, RetrieveModelM
             # Use frontend-provided conversation ID
             create_kwargs = {"user": request.user, "team": self.team, "id": conversation_id}
             conversation = self.get_queryset().create(**create_kwargs)
+            is_new_conversation = True
 
         is_idle = conversation.status == Conversation.Status.IDLE
 
@@ -128,7 +130,9 @@ class ConversationViewSet(TeamAndOrgViewSetMixin, ListModelMixin, RetrieveModelM
 
         # Otherwise, process the new message (new generation) or resume generation
         return StreamingHttpResponse(
-            stream_manager.start_workflow_and_stream(cast(User, request.user).id, serializer.validated_data),
+            stream_manager.start_workflow_and_stream(
+                cast(User, request.user).id, serializer.validated_data, is_new_conversation
+            ),
             content_type="text/event-stream",
         )
 

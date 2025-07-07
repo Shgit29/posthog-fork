@@ -38,10 +38,6 @@ class RedisStream:
     def safe_decode(self, data: bytes, field_name: str) -> Optional[str]:
         """Safely decode Redis stream data with validation."""
         try:
-            if not isinstance(data, bytes):
-                logger.warning(f"Invalid {field_name} type: {type(data)}", conversation_id=str(self.conversation_id))
-                return None
-
             decoded = data.decode("utf-8")
             return decoded
 

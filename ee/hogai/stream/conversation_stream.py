@@ -30,7 +30,9 @@ class ConversationStreamManager:
         self.team_id = team_id
         self.redis_stream = RedisStream(conversation.id, get_conversation_stream_key(conversation.id), team_id)
 
-    async def start_workflow_and_stream(self, user_id: int, validated_data: dict[str, Any]) -> AsyncGenerator[str, Any]:
+    async def start_workflow_and_stream(
+        self, user_id: int, validated_data: dict[str, Any], is_new_conversation: bool
+    ) -> AsyncGenerator[str, Any]:
         """Process a new message and stream the response."""
         try:
             # Start Temporal workflow using async client
@@ -49,7 +51,7 @@ class ConversationStreamManager:
                 conversation_id=self.conversation.id,
                 message=validated_data["message"].model_dump() if validated_data["message"] else None,
                 contextual_tools=validated_data.get("contextual_tools"),
-                is_new_conversation=not validated_data.get("conversation"),
+                is_new_conversation=is_new_conversation,
                 trace_id=str(validated_data["trace_id"]),
                 mode=AssistantMode.ASSISTANT,
             )

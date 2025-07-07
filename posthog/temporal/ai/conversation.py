@@ -1,4 +1,5 @@
 import time
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Optional
@@ -42,8 +43,6 @@ class ConversationWorkflow(PostHogWorkflow):
     @staticmethod
     def parse_inputs(inputs: list[str]) -> ConversationInputs:
         """Parse inputs from the management command CLI."""
-        import json
-
         loaded = json.loads(inputs[0])
         return ConversationInputs(**loaded)
 

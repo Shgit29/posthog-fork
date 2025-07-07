@@ -6,7 +6,9 @@ import { useMocks } from '~/mocks/jest'
 import { initKeaTests } from '~/test/init'
 
 import { maxLogic, QUESTION_SUGGESTIONS_DATA } from './maxLogic'
-import { maxMocks, mockStream } from './testUtils'
+import { maxThreadLogic } from './maxThreadLogic'
+import { maxMocks, mockStream, MOCK_IN_PROGRESS_CONVERSATION } from './testUtils'
+import { ConversationDetail } from '~/types'
 
 describe('maxLogic', () => {
     let logic: ReturnType<typeof maxLogic.build>
@@ -120,5 +122,110 @@ describe('maxLogic', () => {
                 label: 'Product analytics',
             }),
         })
+    })
+
+    it('generates and uses frontendConversationId correctly', async () => {
+        logic = maxLogic()
+        logic.mount()
+
+        const initialFrontendId = logic.values.frontendConversationId
+        expect(initialFrontendId).toBeTruthy()
+        expect(typeof initialFrontendId).toBe('string')
+
+        // Test that starting a new conversation generates a new frontend ID
+        await expectLogic(logic, () => {
+            logic.actions.startNewConversation()
+        }).toMatchValues({
+            frontendConversationId: expect.not.stringMatching(initialFrontendId),
+        })
+
+        expect(logic.values.frontendConversationId).toBeTruthy()
+        expect(logic.values.frontendConversationId).not.toBe(initialFrontendId)
+    })
+
+    it('uses threadLogicKey correctly with frontendConversationId', async () => {
+        logic = maxLogic()
+        logic.mount()
+
+        // When no conversation ID is set, should use frontendConversationId
+        await expectLogic(logic).toMatchValues({
+            threadLogicKey: logic.values.frontendConversationId,
+        })
+
+        // When conversation ID is set, should use conversationId when not in threadKeys
+        await expectLogic(logic, () => {
+            logic.actions.setConversationId('test-conversation-id')
+        }).toMatchValues({
+            threadLogicKey: 'test-conversation-id', // Uses conversationId when not in threadKeys
+        })
+
+        // When threadKey is set for conversation ID, should use that
+        await expectLogic(logic, () => {
+            logic.actions.setThreadKey('test-conversation-id', 'custom-thread-key')
+        }).toMatchValues({
+            threadLogicKey: 'custom-thread-key',
+        })
+    })
+
+    it('has reconnectToInProgressConversation action', async () => {
+        logic = maxLogic()
+        logic.mount()
+
+        // Just verify the action exists and can be called without error
+        expect(typeof logic.actions.reconnectToInProgressConversation).toBe('function')
+
+        const conversation = MOCK_IN_PROGRESS_CONVERSATION
+        expect(() => {
+            logic.actions.reconnectToInProgressConversation(conversation as ConversationDetail)
+        }).not.toThrow()
+    })
+
+    it('finds and calls reconnectToStream on mounted thread logic', async () => {
+        logic = maxLogic()
+        logic.mount()
+
+        // Create a mock thread logic with the reconnectToStream action
+        const mockThreadLogic = {
+            actions: {
+                reconnectToStream: jest.fn(),
+            },
+        }
+
+        // Mock the findMounted function to return our mock
+        const findMountedSpy = jest.spyOn(maxThreadLogic, 'findMounted').mockReturnValue(mockThreadLogic as any)
+
+        const conversation = MOCK_IN_PROGRESS_CONVERSATION
+
+        await expectLogic(logic, () => {
+            logic.actions.setThreadKey(conversation.id, 'test-thread-key')
+            logic.actions.reconnectToInProgressConversation(conversation as ConversationDetail)
+        })
+
+        expect(findMountedSpy).toHaveBeenCalledWith({
+            conversationId: 'test-thread-key',
+            conversation: conversation,
+        })
+        expect(mockThreadLogic.actions.reconnectToStream).toHaveBeenCalled()
+
+        findMountedSpy.mockRestore()
+    })
+
+    it('handles missing mounted thread logic gracefully', async () => {
+        logic = maxLogic()
+        logic.mount()
+
+        // Mock findMounted to return null (no mounted logic)
+        const findMountedSpy = jest.spyOn(maxThreadLogic, 'findMounted').mockReturnValue(null)
+
+        const conversation = MOCK_IN_PROGRESS_CONVERSATION
+
+        // Should not throw an error when no thread logic is mounted
+        expect(() => {
+            logic.actions.reconnectToInProgressConversation(conversation as ConversationDetail)
+        }).not.toThrow()
+
+        expect(findMountedSpy).toHaveBeenCalled()
+
+        findMountedSpy.mockRestore()
     })
 })
