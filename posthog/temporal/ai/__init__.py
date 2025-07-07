@@ -21,7 +21,6 @@ from .session_summary.summarize_session_group import (
 
 from .session_summary.shared import SingleSessionSummaryInputs, fetch_session_data_activity
 
-# Import conversation processing workflows
 from posthog.temporal.ai.conversation import (
     ConversationWorkflow,
     process_conversation_activity,

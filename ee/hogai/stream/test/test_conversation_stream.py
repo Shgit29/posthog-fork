@@ -91,7 +91,7 @@ class TestConversationStreamManager(BaseTest):
             validated_data = {
                 "message": Mock(model_dump=Mock(return_value={"content": "test"})),
                 "contextual_tools": None,
-                "conversation": self.conversation,
+                "conversation": self.conversation.id,
                 "trace_id": uuid4(),
             }
 

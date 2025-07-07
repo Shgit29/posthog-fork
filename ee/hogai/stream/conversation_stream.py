@@ -28,7 +28,7 @@ class ConversationStreamManager:
     def __init__(self, conversation: Conversation, team_id: int) -> None:
         self.conversation = conversation
         self.team_id = team_id
-        self.redis_stream = RedisStream(conversation.id, get_conversation_stream_key(conversation.id), team_id)
+        self.redis_stream = RedisStream(conversation.id, get_conversation_stream_key(conversation.id))
 
     async def start_workflow_and_stream(
         self, user_id: int, validated_data: dict[str, Any], is_new_conversation: bool
@@ -123,16 +123,13 @@ class ConversationStreamManager:
         Returns:
             Redis stream ID to start reading from ('0', '$', or specific ID)
         """
-        if not historical_messages:
+        if not historical_messages or len(historical_messages) == 0:
             return "0"
 
         # Find the highest message_id from historical messages to ensure we don't miss any
         # Redis stream IDs are in format "timestamp-sequence", so we can sort them
         sorted_messages = sorted(historical_messages, key=lambda x: x[0])
-        last_id = sorted_messages[-1][0]
-
-        # Use "$" for new messages only if we've processed all historical messages
-        return "$" if not historical_messages else last_id
+        return sorted_messages[-1][0]
 
     async def _process_historical_messages(self) -> tuple[list[str], list[tuple[str, dict[bytes, bytes]]], bool]:
         """Process historical messages from Redis stream.

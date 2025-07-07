@@ -132,6 +132,10 @@ describe('maxLogic', () => {
         expect(initialFrontendId).toBeTruthy()
         expect(typeof initialFrontendId).toBe('string')
 
+        // Test that the ID is a valid UUID
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        expect(initialFrontendId).toMatch(uuidRegex)
+
         // Test that starting a new conversation generates a new frontend ID
         await expectLogic(logic, () => {
             logic.actions.startNewConversation()
@@ -141,6 +145,9 @@ describe('maxLogic', () => {
 
         expect(logic.values.frontendConversationId).toBeTruthy()
         expect(logic.values.frontendConversationId).not.toBe(initialFrontendId)
+
+        // Test that the new ID is also a valid UUID
+        expect(logic.values.frontendConversationId).toMatch(uuidRegex)
     })
 
     it('uses threadLogicKey correctly with frontendConversationId', async () => {

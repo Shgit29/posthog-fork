@@ -1,6 +1,6 @@
 import asyncio
 import structlog
-from typing import Optional
+from typing import Any, Optional
 from collections.abc import AsyncGenerator
 from uuid import UUID
 
@@ -28,20 +28,19 @@ class RedisStreamError(Exception):
 class RedisStream:
     """Manages conversation streaming from Redis streams."""
 
-    def __init__(self, conversation_id: UUID, stream_key: str, team_id: int):
+    def __init__(self, conversation_id: UUID, stream_key: str):
         self.conversation_id = conversation_id
         self.stream_key = stream_key
         self.redis_client = get_async_client(settings.REDIS_URL)
         self._deletion_lock = asyncio.Lock()
         self._is_deleted = False
 
-    def safe_decode(self, data: bytes, field_name: str) -> Optional[str]:
+    def safe_decode(self, data: Any, field_name: str) -> Optional[str]:
         """Safely decode Redis stream data with validation."""
         try:
             decoded = data.decode("utf-8")
             return decoded
-
-        except UnicodeDecodeError as e:
+        except Exception as e:
             logger.warning(f"Failed to decode {field_name} data: {e}", conversation_id=str(self.conversation_id))
             return None
 
@@ -160,7 +159,10 @@ class RedisStream:
                 count=count,
             )
             return messages
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "Failed to retrieve stream history", error=str(e), conversation_id=str(self.conversation_id)
+            )
             return []
 
     async def get_stream_info(self) -> dict:
@@ -192,5 +194,6 @@ class RedisStream:
                     deleted=result > 0,
                 )
                 return result > 0
-            except Exception:
+            except Exception as e:
+                logger.exception("Failed to delete stream", error=str(e), conversation_id=str(self.conversation_id))
                 return False

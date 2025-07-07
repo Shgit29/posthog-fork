@@ -99,12 +99,8 @@ async def process_conversation_activity(inputs: ConversationInputs) -> None:
         return str(int(time.time() * 1000))
 
     try:
-        chunk_count = 0
-
         serializer = AssistantSSESerializer()
         async for chunk in assistant.astream():
-            chunk_count += 1
-
             # Add chunk to Redis stream immediately
             await redis_client.xadd(
                 stream_key,

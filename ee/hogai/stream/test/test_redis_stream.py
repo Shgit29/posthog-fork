@@ -13,14 +13,14 @@ class TestRedisStream(TestCase):
         self.conversation_id = uuid4()
         self.stream_key = f"test_stream:{self.conversation_id}"
         self.team_id = 123
-        self.redis_stream = RedisStream(self.conversation_id, self.stream_key, self.team_id)
+        self.redis_stream = RedisStream(self.conversation_id, self.stream_key)
 
     @patch("ee.hogai.stream.redis_stream.get_async_client")
     def test_init(self, mock_get_client):
         mock_client = AsyncMock()
         mock_get_client.return_value = mock_client
 
-        stream = RedisStream(self.conversation_id, self.stream_key, self.team_id)
+        stream = RedisStream(self.conversation_id, self.stream_key)
 
         self.assertEqual(stream.conversation_id, self.conversation_id)
         self.assertEqual(stream.stream_key, self.stream_key)

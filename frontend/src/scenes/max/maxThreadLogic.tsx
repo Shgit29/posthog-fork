@@ -115,14 +115,17 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
 
     actions({
         // null prompt means resuming streaming or continuing previous generation
-        askMax: (prompt: string | null, generationAttempt: number = 0) => ({ prompt, generationAttempt }),
+        askMax: (prompt: string | null) => ({ prompt }),
         reconnectToStream: true,
-        streamConversation: (streamData: {
-            content: string | null
-            conversation?: string
-            contextual_tools?: Record<string, any>
-            ui_context?: any
-        }) => ({ streamData }),
+        streamConversation: (
+            streamData: {
+                content: string | null
+                conversation?: string
+                contextual_tools?: Record<string, any>
+                ui_context?: any
+            },
+            generationAttempt: number
+        ) => ({ streamData, generationAttempt }),
         stopGeneration: true,
         completeThreadGeneration: true,
         addMessage: (message: ThreadMessage) => ({ message }),
@@ -190,7 +193,7 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
     })),
 
     listeners(({ actions, values, cache, props }) => ({
-        askMax: async ({ prompt, generationAttempt }, breakpoint) => {
+        askMax: async ({ prompt }) => {
             if (!values.dataProcessingAccepted) {
                 return // Skip - this will be re-fired by the `onApprove` on `AIConsentPopoverWrapper`
             }
@@ -212,65 +215,29 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                 actions.updateGlobalConversationCache(updatedConversation)
             }
 
-            if (generationAttempt === 0 && prompt) {
-                const message: ThreadMessage = {
-                    type: AssistantMessageType.Human,
-                    content: prompt,
-                    status: 'completed',
-                }
-                if (values.compiledContext) {
-                    message.ui_context = values.compiledContext
-                }
-                actions.addMessage(message)
-            }
-
-            try {
-                actions.streamConversation({
+            actions.streamConversation(
+                {
                     content: prompt,
                     contextual_tools: Object.fromEntries(values.tools.map((tool) => [tool.name, tool.context])),
                     ui_context: values.compiledContext || undefined,
                     conversation: values.conversation?.id || values.conversationId,
-                })
-            } catch (e) {
-                if (!(e instanceof DOMException) || e.name !== 'AbortError') {
-                    const relevantErrorMessage = { ...FAILURE_MESSAGE, id: uuid() } // Generic message by default
-
-                    // Prevents parallel generation attempts. Total wait time is: 21 seconds.
-                    if (e instanceof ApiError) {
-                        if (e.status === 409 && generationAttempt < 6) {
-                            await breakpoint(1000 * (generationAttempt + 1))
-                            actions.askMax(prompt, generationAttempt + 1)
-                            return
-                        }
-
-                        if (e.status === 429) {
-                            relevantErrorMessage.content = `You've reached my usage limit for now. Please try again ${e.formattedRetryAfter}.`
-                        }
-
-                        if (e.status === 400 && e.data?.attr === 'content') {
-                            relevantErrorMessage.content =
-                                'Oops! Your message is too long. Ensure it has no more than 40000 characters.'
-                        }
-                    } else if (e instanceof Error && e.message.toLowerCase() === 'network error') {
-                        relevantErrorMessage.content =
-                            'Oops! You appear to be offline. Please check your internet connection.'
-                    } else {
-                        posthog.captureException(e)
-                        console.error(e)
-                    }
-
-                    if (values.threadRaw[values.threadRaw.length - 1]?.status === 'loading') {
-                        actions.replaceMessage(values.threadRaw.length - 1, relevantErrorMessage)
-                    } else if (values.threadRaw[values.threadRaw.length - 1]?.status !== 'error') {
-                        actions.addMessage(relevantErrorMessage)
-                    }
-                }
-            }
+                },
+                0
+            )
         },
 
-        streamConversation: async ({ streamData }) => {
+        streamConversation: async ({ streamData, generationAttempt }, breakpoint) => {
             // Set active streaming threads, so we know streaming is active
             actions.setActiveStreamingThreads(1)
+
+            if (generationAttempt === 0 && streamData.content) {
+                const message: ThreadMessage = {
+                    type: AssistantMessageType.Human,
+                    content: streamData.content,
+                    status: 'completed',
+                }
+                actions.addMessage(message)
+            }
 
             try {
                 cache.generationController = new AbortController()
@@ -398,9 +365,46 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                 }
             } catch (e) {
                 if (!(e instanceof DOMException) || e.name !== 'AbortError') {
-                    console.error('Stream conversation failed:', e)
                     actions.setActiveStreamingThreads(-1)
-                    throw e // Re-throw for askMax error handling
+                    const relevantErrorMessage = { ...FAILURE_MESSAGE, id: uuid() } // Generic message by default
+
+                    // Prevents parallel generation attempts. Total wait time is: 21 seconds.
+                    if (e instanceof ApiError) {
+                        if (e.status === 409 && generationAttempt < 6) {
+                            await breakpoint(1000 * (generationAttempt + 1))
+                            actions.streamConversation(
+                                {
+                                    content: streamData.content,
+                                    conversation: streamData.conversation,
+                                    contextual_tools: streamData.contextual_tools,
+                                    ui_context: streamData.ui_context,
+                                },
+                                generationAttempt + 1
+                            )
+                            return
+                        }
+
+                        if (e.status === 429) {
+                            relevantErrorMessage.content = `You've reached my usage limit for now. Please try again ${e.formattedRetryAfter}.`
+                        }
+
+                        if (e.status === 400 && e.data?.attr === 'content') {
+                            relevantErrorMessage.content =
+                                'Oops! Your message is too long. Ensure it has no more than 40000 characters.'
+                        }
+                    } else if (e instanceof Error && e.message.toLowerCase() === 'network error') {
+                        relevantErrorMessage.content =
+                            'Oops! You appear to be offline. Please check your internet connection.'
+                    } else {
+                        posthog.captureException(e)
+                        console.error(e)
+                    }
+
+                    if (values.threadRaw[values.threadRaw.length - 1]?.status === 'loading') {
+                        actions.replaceMessage(values.threadRaw.length - 1, relevantErrorMessage)
+                    } else if (values.threadRaw[values.threadRaw.length - 1]?.status !== 'error') {
+                        actions.addMessage(relevantErrorMessage)
+                    }
                 }
             }
 
@@ -430,10 +434,13 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
 
             // Historical messages should already be loaded by propsChanged
             // Just start the stream reconnection
-            actions.streamConversation({
-                conversation: props.conversationId,
-                content: null,
-            })
+            actions.streamConversation(
+                {
+                    conversation: props.conversationId,
+                    content: null,
+                },
+                0
+            )
         },
 
         retryLastMessage: () => {
