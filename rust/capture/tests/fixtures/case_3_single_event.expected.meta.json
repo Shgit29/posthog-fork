@@ -1,0 +1,13 @@
+[
+    {
+        "metadata": {
+            "data_type": "AnalyticsMain"
+        },
+        "event": {
+            "distinct_id": "0197e2de-7996-74b8-845f-f423c1827f58",
+            "event": "$pageview",
+            "timestamp": "2025-07-07T08:00Z",
+            "token": "phc_123abc456def"
+        }
+    }
+]

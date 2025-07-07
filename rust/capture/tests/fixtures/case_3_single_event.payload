@@ -58,6 +58,6 @@
       "$initial_gclid": "abc123",
       "$initial_referrer": "https://example.com/",
       "$initial_referring_domain": "example.com"
-    },
+    }
   }
 }

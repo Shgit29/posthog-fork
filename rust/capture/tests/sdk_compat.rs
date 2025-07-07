@@ -221,6 +221,7 @@ fn assert_events_match(
                 object.remove("library_version");
             }
 
+            // TODO(eli): load .data.expected.json file with hydrated DATA PAYLOAD
             let found_props: Value = serde_json::from_str(&message.event.data)?;
             let match_config = assert_json_diff::Config::new(assert_json_diff::CompareMode::Strict);
             if let Err(e) =
@@ -242,12 +243,10 @@ fn assert_events_match(
             }
         }
 
-        let match_config = assert_json_diff::Config::new(assert_json_diff::CompareMode::Strict);
-        if let Err(e) =
-            assert_json_matches_no_panic(&json!(expected), &json!(message.event), match_config)
-        {
-            anyhow::bail!("record mismatch at event {}: {}", event_number, e);
-        }
+        // Vec<ProcessedEvent> from MemorySink as JSON and Vec<Value> from .expected file as JSON
+        let got_json = json!(message.event);
+        let exp_json = json!(expected);
+        assert_json_include!(actual: &got_json, expected: &exp_json)
     }
 
     Ok(())

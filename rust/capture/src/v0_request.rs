@@ -3,8 +3,7 @@ use std::io::prelude::*;
 use bytes::{Buf, Bytes};
 use common_types::{CapturedEvent, RawEngageEvent, RawEvent};
 use flate2::read::GzDecoder;
-use serde::de::Error as DeError;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use time::format_description::well_known::Iso8601;
 use time::OffsetDateTime;
 use tracing::{debug, error, instrument, warn, Span};
@@ -401,7 +400,7 @@ pub fn path_is_legacy_endpoint(path: &str) -> bool {
         || path.starts_with("/track")
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
 pub enum DataType {
     AnalyticsMain,
     AnalyticsHistorical,
@@ -411,35 +410,13 @@ pub enum DataType {
     SnapshotMain,
 }
 
-impl<'de> Deserialize<'de> for DataType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value =
-            String::deserialize(deserializer).unwrap_or("deserialization_error".to_string());
-
-        let result = match value.to_lowercase().as_str() {
-            "analytics_main" => DataType::AnalyticsMain,
-            "analytics_historical" => DataType::AnalyticsHistorical,
-            "client_ingest_warning" => DataType::ClientIngestionWarning,
-            "heatmap_main" => DataType::HeatmapMain,
-            "exception_main" => DataType::ExceptionMain,
-            "snapshot_main" => DataType::SnapshotMain,
-            invalid => return Err(DeError::custom(format!("invalid data_type: {}", invalid))),
-        };
-
-        Ok(result)
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProcessedEvent {
     pub metadata: ProcessedEventMetadata,
     pub event: CapturedEvent,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProcessedEventMetadata {
     pub data_type: DataType,
     pub session_id: Option<String>,
