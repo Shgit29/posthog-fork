@@ -154,6 +154,22 @@ class _SharedAssistantState(BaseModel):
     The user's search query for finding existing insights.
     """
     search_insights_query: Optional[str] = Field(default=None)
+    filter_options_previous_response_id: Optional[str] = Field(default=None)
+    """
+    The ID of the previous OpenAI Responses API response made by the filter options node.
+    """
+    filter_options_dict: Optional[dict] = Field(default=None)
+    """
+    The filter options to apply to the product.
+    """
+    change: Optional[str] = Field(default=None)
+    """
+    The change requested for the filters.
+    """
+    current_filters: Optional[dict] = Field(default=None)
+    """
+    The current filters applied to the product.
+    """
 
 
 class AssistantState(_SharedAssistantState):
@@ -186,6 +202,10 @@ class PartialAssistantState(_SharedAssistantState):
             root_conversation_start_id="",
             rag_context="",
             query_generation_retry_count=0,
+            filter_options_previous_response_id="",
+            filter_options_dict=None,
+            change="",
+            current_filters=None,
         )
 
 
@@ -224,6 +244,8 @@ class AssistantNodeName(StrEnum):
     INSIGHTS_SUBGRAPH = "insights_subgraph"
     TITLE_GENERATOR = "title_generator"
     INSIGHTS_SEARCH = "insights_search"
+    FILTER_OPTIONS = "filter_options"
+    FILTER_OPTIONS_TOOLS = "filter_options_tools"
 
 
 class AssistantMode(StrEnum):
