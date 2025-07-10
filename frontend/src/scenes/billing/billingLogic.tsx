@@ -639,6 +639,11 @@ export const billingLogic = kea<billingLogicType>([
             }
         },
         determineBillingAlert: () => {
+            // If we already have a billing alert, don't show another one
+            if (values.billingAlert) {
+                return
+            }
+
             if (values.productSpecificAlert) {
                 actions.setBillingAlert(values.productSpecificAlert)
                 return
@@ -816,6 +821,7 @@ export const billingLogic = kea<billingLogicType>([
                     status: 'error',
                     title: 'Error',
                     message: _search.billing_error,
+                    contactSupport: true,
                 })
             }
 

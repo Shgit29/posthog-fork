@@ -1,4 +1,8 @@
 import { EventSourceMessage, fetchEventSource } from '@microsoft/fetch-event-source'
+import {
+    ErrorTrackingRule,
+    ErrorTrackingRuleType,
+} from '@posthog/products-error-tracking/frontend/configuration/rules/types'
 import { encodeParams } from 'kea-router'
 import { ActivityLogProps } from 'lib/components/ActivityLog/ActivityLog'
 import { ActivityLogItem } from 'lib/components/ActivityLog/humanizeActivity'
@@ -6,8 +10,7 @@ import { dayjs } from 'lib/dayjs'
 import { apiStatusLogic } from 'lib/logic/apiStatusLogic'
 import { humanFriendlyDuration, objectClean, toParams } from 'lib/utils'
 import posthog from 'posthog-js'
-import { ErrorTrackingRule, ErrorTrackingRuleType } from 'products/error_tracking/frontend/configuration/rules/types'
-import { HogFlow } from 'products/messaging/frontend/Campaigns/Workflows/types'
+import { HogFlow } from 'products/messaging/frontend/Campaigns/hogflows/types'
 import { MessageTemplate } from 'products/messaging/frontend/TemplateLibrary/messageTemplatesLogic'
 import { RecordingComment } from 'scenes/session-recordings/player/inspector/playerInspectorLogic'
 import { SavedSessionRecordingPlaylistsResult } from 'scenes/session-recordings/saved-playlists/savedSessionRecordingPlaylistsLogic'
@@ -20,6 +23,7 @@ import {
     DatabaseSerializedFieldType,
     ErrorTrackingIssue,
     ErrorTrackingRelationalIssue,
+    ExternalDataSourceType,
     FileSystemCount,
     FileSystemEntry,
     HogCompileResponse,
@@ -28,6 +32,7 @@ import {
     HogQLVariable,
     LogMessage,
     LogsQuery,
+    Node,
     NodeKind,
     PersistedFolder,
     QuerySchema,
@@ -35,6 +40,7 @@ import {
     RecordingsQuery,
     RecordingsQueryResponse,
     RefreshType,
+    SourceConfig,
 } from '~/queries/schema/schema-general'
 import { HogQLQueryString, setLatestVersionsOnQuery } from '~/queries/utils'
 import {
@@ -78,7 +84,6 @@ import {
     ExternalDataSourceCreatePayload,
     ExternalDataSourceSchema,
     ExternalDataSourceSyncSchema,
-    ExternalDataSourceType,
     FeatureFlagAssociatedRoleType,
     FeatureFlagStatusResponse,
     FeatureFlagType,
@@ -105,6 +110,7 @@ import {
     NotebookListItemType,
     NotebookNodeResource,
     NotebookType,
+    type OAuthApplicationPublicMetadata,
     OrganizationFeatureFlags,
     OrganizationFeatureFlagsCopyBody,
     OrganizationMemberScopedApiKeysResponse,
@@ -144,12 +150,11 @@ import {
     SurveyStatsResponse,
     TeamType,
     UserBasicType,
-    UserGroup,
     UserInterviewType,
     UserType,
 } from '~/types'
 
-import { MaxBillingContext, MaxContextShape } from '../scenes/max/maxTypes'
+import { MaxBillingContext, MaxUIContext } from '../scenes/max/maxTypes'
 import { AlertType, AlertTypeWrite } from './components/Alerts/types'
 import {
     ErrorTrackingStackFrame,
@@ -260,7 +265,7 @@ export function getCookie(name: string): string | null {
 export async function getJSONOrNull(response: Response): Promise<any> {
     try {
         return await response.json()
-    } catch (e) {
+    } catch {
         return null
     }
 }
@@ -1076,23 +1081,6 @@ export class ApiRequest {
         return this.projectsDetail(teamId).addPathComponent('uploaded_media')
     }
 
-    // # UserGroups
-    public userGroups(teamId?: TeamType['id']): ApiRequest {
-        return this.projectsDetail(teamId).addPathComponent('user_groups')
-    }
-
-    public userGroup(id: UserGroup['id']): ApiRequest {
-        return this.userGroups().addPathComponent(id)
-    }
-
-    public userGroupAddMember(id: UserGroup['id']): ApiRequest {
-        return this.userGroup(id).addPathComponent('add')
-    }
-
-    public userGroupRemoveMember(id: UserGroup['id']): ApiRequest {
-        return this.userGroup(id).addPathComponent('remove')
-    }
-
     // # Alerts
     public alerts(alertId?: AlertType['id'], insightId?: InsightModel['id'], teamId?: TeamType['id']): ApiRequest {
         if (alertId) {
@@ -1137,6 +1125,10 @@ export class ApiRequest {
             return apiRequest.withQueryString('show_progress=true')
         }
         return apiRequest
+    }
+
+    public queryUpgrade(teamId?: TeamType['id']): ApiRequest {
+        return this.environmentsDetail(teamId).addPathComponent('query').addPathComponent('upgrade')
     }
 
     // Conversations
@@ -1301,6 +1293,10 @@ export class ApiRequest {
 
     public messagingTemplate(templateId: MessageTemplate['id']): ApiRequest {
         return this.messagingTemplates().addPathComponent(templateId)
+    }
+
+    public oauthApplicationPublicMetadata(clientId: string): ApiRequest {
+        return this.addPathComponent('oauth_application').addPathComponent('metadata').addPathComponent(clientId)
     }
 
     public hogFlows(): ApiRequest {
@@ -2335,17 +2331,23 @@ const api = {
     hogFunctions: {
         async list({
             filter_groups,
+            search,
             types,
+            limit,
         }: {
             filter_groups?: CyclotronJobFiltersType[]
+            search?: string
             types?: HogFunctionTypeType[]
-        }): Promise<PaginatedResponse<HogFunctionType>> {
+            limit?: number
+        }): Promise<CountedPaginatedResponse<HogFunctionType>> {
             return await new ApiRequest()
                 .hogFunctions()
                 .withQueryString({
                     filter_groups,
                     // NOTE: The API expects "type" as thats the DB level name
                     ...(types ? { type: types.join(',') } : {}),
+                    ...(search ? { search } : {}),
+                    ...(limit ? { limit } : {}),
                 })
                 .get()
         },
@@ -2378,7 +2380,6 @@ const api = {
         },
         async listTemplates(params: {
             types: HogFunctionTypeType[]
-            db_templates?: boolean
         }): Promise<PaginatedResponse<HogFunctionTemplateType>> {
             const finalParams = {
                 ...params,
@@ -2388,8 +2389,8 @@ const api = {
 
             return new ApiRequest().hogFunctionTemplates().withQueryString(finalParams).get()
         },
-        async getTemplate(id: HogFunctionTemplateType['id'], db_templates?: boolean): Promise<HogFunctionTemplateType> {
-            return await new ApiRequest().hogFunctionTemplate(id).withQueryString({ db_templates }).get()
+        async getTemplate(id: HogFunctionTemplateType['id']): Promise<HogFunctionTemplateType> {
+            return await new ApiRequest().hogFunctionTemplate(id).get()
         },
 
         async listIcons(params: { query?: string } = {}): Promise<HogFunctionIconResponse[]> {
@@ -2571,28 +2572,6 @@ const api = {
         },
     },
 
-    userGroups: {
-        async list(): Promise<{ results: UserGroup[] }> {
-            return await new ApiRequest().userGroups().get()
-        },
-
-        async delete(id: UserGroup['id']): Promise<void> {
-            return await new ApiRequest().userGroup(id).delete()
-        },
-
-        async create(name: UserGroup['name']): Promise<UserGroup> {
-            return await new ApiRequest().userGroups().create({ data: { name } })
-        },
-
-        async addMember(id: UserGroup['id'], userId: UserBasicType['id']): Promise<UserGroup> {
-            return await new ApiRequest().userGroupAddMember(id).create({ data: { userId } })
-        },
-
-        async removeMember(id: UserGroup['id'], userId: UserBasicType['id']): Promise<UserGroup> {
-            return await new ApiRequest().userGroupRemoveMember(id).create({ data: { userId } })
-        },
-    },
-
     recordings: {
         async list(params: RecordingsQuery): Promise<RecordingsQueryResponse> {
             return await new ApiRequest().recordings().withQueryString(toParams(params)).get()
@@ -2664,7 +2643,7 @@ const api = {
                 if (textLines) {
                     return textLines.split('\n')
                 }
-            } catch (e) {
+            } catch {
                 // we assume it is gzipped, swallow the error, and carry on below
             }
             return []
@@ -2877,13 +2856,13 @@ const api = {
             return await new ApiRequest()
                 .batchExport(id)
                 .withAction('run_test_step')
-                .create({ data: { ...{ step: step }, ...data } })
+                .create({ data: { step: step, ...data } })
         },
         async runTestStepNew(step: number, data: Record<string, any>): Promise<BatchExportConfigurationTestStep> {
             return await new ApiRequest()
                 .batchExports()
                 .withAction('run_test_step_new')
-                .create({ data: { ...{ step: step }, ...data } })
+                .create({ data: { step: step, ...data } })
         },
     },
 
@@ -3121,6 +3100,9 @@ const api = {
                 .externalDataSources()
                 .withAction('database_schema')
                 .create({ data: { source_type, ...payload } })
+        },
+        async wizard(): Promise<Record<string, SourceConfig>> {
+            return await new ApiRequest().externalDataSources().withAction('wizard').get()
         },
         async source_prefix(
             source_type: ExternalDataSourceType,
@@ -3450,6 +3432,11 @@ const api = {
             return await new ApiRequest().messagingTemplate(templateId).update({ data })
         },
     },
+    oauthApplication: {
+        async getPublicMetadata(clientId: string): Promise<OAuthApplicationPublicMetadata> {
+            return await new ApiRequest().oauthApplicationPublicMetadata(clientId).get()
+        },
+    },
     hogFlows: {
         async getHogFlows(): Promise<PaginatedResponse<HogFlow>> {
             return await new ApiRequest().hogFlows().get()
@@ -3465,6 +3452,18 @@ const api = {
         },
         async deleteHogFlow(hogFlowId: HogFlow['id']): Promise<void> {
             return await new ApiRequest().hogFlow(hogFlowId).delete()
+        },
+        async createTestInvocation(
+            hogFlowId: HogFlow['id'],
+            data: {
+                configuration: Record<string, any>
+                mock_async_functions: boolean
+                globals?: any
+                clickhouse_event?: any
+                invocation_id?: string
+            }
+        ): Promise<any> {
+            return await new ApiRequest().hogFlow(hogFlowId).withAction('invocations').create({ data })
         },
     },
 
@@ -3528,12 +3527,19 @@ const api = {
         })
     },
 
+    schema: {
+        async queryUpgrade(data: { query: Node }): Promise<{ query: Node }> {
+            return await new ApiRequest().queryUpgrade().create({ data })
+        },
+    },
+
     conversations: {
         async stream(
             data: {
-                content: string
+                /** The user message. Null content means we're continuing previous generation. */
+                content: string | null
                 contextual_tools?: Record<string, any>
-                ui_context?: MaxContextShape
+                ui_context?: MaxUIContext
                 billing_context?: MaxBillingContext
                 conversation?: string | null
                 trace_id: string

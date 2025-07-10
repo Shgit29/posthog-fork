@@ -5,7 +5,7 @@ import { DB } from '~/utils/db/db'
 import { MessageSizeTooLarge } from '~/utils/db/error'
 
 import { captureIngestionWarning } from '../utils'
-import { BatchWritingPersonsStore } from './batch-writing-person-store'
+import { BatchWritingPersonsStore, BatchWritingPersonsStoreForBatch } from './batch-writing-person-store'
 import { fromInternalPerson } from './person-update-batch'
 
 // Mock the utils module
@@ -27,6 +27,7 @@ jest.mock('./metrics', () => ({
     personFlushOperationsCounter: { inc: jest.fn() },
     personMethodCallsPerBatchHistogram: { observe: jest.fn() },
     personOptimisticUpdateConflictsPerBatchCounter: { inc: jest.fn() },
+    personPropertyKeyUpdateCounter: { labels: jest.fn().mockReturnValue({ inc: jest.fn() }) },
     personRetryAttemptsHistogram: { observe: jest.fn() },
     personWriteMethodAttemptCounter: { inc: jest.fn() },
     personWriteMethodLatencyHistogram: { observe: jest.fn() },
@@ -83,6 +84,9 @@ describe('BatchWritingPersonStore', () => {
             deletePerson: jest.fn().mockImplementation(() => {
                 return Promise.resolve([])
             }),
+            moveDistinctIds: jest.fn().mockImplementation(() => {
+                return Promise.resolve([])
+            }),
         } as unknown as DB
 
         personStore = new BatchWritingPersonsStore(db)
@@ -92,11 +96,15 @@ describe('BatchWritingPersonStore', () => {
         jest.clearAllMocks()
     })
 
+    const getBatchStoreForBatch = () => personStore.forBatch() as BatchWritingPersonsStoreForBatch
+
     it('should update person in cache', async () => {
-        const personStoreForBatch = personStore.forBatch()
-        const response = await personStoreForBatch.updatePersonForUpdate(
+        const personStoreForBatch = getBatchStoreForBatch()
+        const response = await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
             person,
-            { properties: { new_value: 'new_value' } },
+            { new_value: 'new_value' },
+            [],
+            {},
             'test'
         )
         expect(response).toEqual([
@@ -107,43 +115,99 @@ describe('BatchWritingPersonStore', () => {
 
         // Validate cache - should contain a PersonUpdate object
         const cache = (personStoreForBatch as any)['personUpdateCache']
-        const cachedUpdate = cache.get('1:test')
+        const cachedUpdate = cache.get(`${teamId}:${person.id}`)
         expect(cachedUpdate).toBeDefined()
         expect(cachedUpdate.distinct_id).toBe('test')
         expect(cachedUpdate.needs_write).toBe(true)
-        expect(cachedUpdate.properties).toEqual({ test: 'test', new_value: 'new_value' })
+        expect(cachedUpdate.properties).toEqual({ test: 'test' }) // Original properties from database
+        expect(cachedUpdate.properties_to_set).toEqual({ new_value: 'new_value' }) // New properties to set
+        expect(cachedUpdate.properties_to_unset).toEqual([]) // No properties to unset
         expect(cachedUpdate.team_id).toBe(1)
-        expect(cachedUpdate.uuid).toBe('1')
+        expect(cachedUpdate.id).toBe('1')
+    })
+
+    it('should handle unsetting properties', async () => {
+        const personStoreForBatch = getBatchStoreForBatch()
+        const response = await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            person,
+            {
+                value_to_unset: 'value_to_unset',
+            },
+            [],
+            {},
+            'test'
+        )
+        expect(response).toEqual([
+            { ...person, version: 1, properties: { test: 'test', value_to_unset: 'value_to_unset' } },
+            [],
+            false,
+        ])
+
+        const response2 = await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            person,
+            {},
+            ['value_to_unset'],
+            {},
+            'test'
+        )
+        expect(response2).toEqual([{ ...person, version: 1, properties: { test: 'test' } }, [], false])
+
+        // Check cache contains merged updates
+        const cache = personStoreForBatch.getUpdateCache()
+        const cachedUpdate = cache.get(`${teamId}:${person.id}`)!
+        expect(cachedUpdate.properties).toEqual({ test: 'test' })
+        expect(cachedUpdate.properties_to_set).toEqual({ test: 'test', value_to_unset: 'value_to_unset' })
+        expect(cachedUpdate.properties_to_unset).toEqual(['value_to_unset']) // No properties to unset
+        expect(cachedUpdate.needs_write).toBe(true)
+
+        await personStoreForBatch.flush()
+
+        expect(db.updatePerson).toHaveBeenCalledWith(
+            expect.objectContaining({
+                properties: { test: 'test' },
+            }),
+            expect.anything(),
+            undefined,
+            'updatePersonNoAssert'
+        )
     })
 
     it('should remove person from caches when deleted', async () => {
-        const personStoreForBatch = personStore.forBatch()
+        const personStoreForBatch = getBatchStoreForBatch()
 
         // Add person to cache using the proper PersonUpdate structure
-        let updateCache = (personStoreForBatch as any)['personUpdateCache']
+        let updateCache = personStoreForBatch.getUpdateCache()
         const personUpdate = fromInternalPerson(person, 'test')
         personUpdate.properties = { new_value: 'new_value' }
         personUpdate.needs_write = false
-        updateCache.set('1:test', personUpdate)
+        updateCache.set(`${teamId}:${person.id}`, personUpdate)
 
-        let checkCache = (personStoreForBatch as any)['personCheckCache']
-        checkCache.set('1:test', person)
+        let checkCache = personStoreForBatch.getCheckCache()
+        checkCache.set(`${teamId}:test`, person)
+
+        personStoreForBatch.setDistinctIdToPersonId(teamId, 'test', person.id)
 
         const response = await personStoreForBatch.deletePerson(person, 'test')
         expect(response).toEqual([])
 
         // Validate cache
-        updateCache = (personStoreForBatch as any)['personUpdateCache']
-        checkCache = (personStoreForBatch as any)['personCheckCache']
-        expect(updateCache.get('1:test')).toBeUndefined()
-        expect(checkCache.get('1:test')).toBeUndefined()
+        updateCache = personStoreForBatch.getUpdateCache()
+        checkCache = personStoreForBatch.getCheckCache()
+        expect(updateCache.get(`${teamId}:${person.id}`)).toBeUndefined()
+        expect(checkCache.get(`${teamId}:${person.id}`)).toBeUndefined()
     })
 
     it('should flush person updates with default NO_ASSERT mode', async () => {
         const personStoreForBatch = personStore.forBatch()
 
         // Add a person update to cache
-        await personStoreForBatch.updatePersonForUpdate(person, { properties: { new_value: 'new_value' } }, 'test')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            person,
+            { new_value: 'new_value' },
+            [],
+            {},
+            'test'
+        )
 
         // Flush should call updatePerson (NO_ASSERT default mode)
         await personStoreForBatch.flush()
@@ -158,10 +222,16 @@ describe('BatchWritingPersonStore', () => {
         const personStoreForBatch = assertVersionStore.forBatch()
 
         // Mock optimistic update to fail (version mismatch)
-        db.updatePersonAssertVersion = jest.fn().mockResolvedValue(undefined)
+        db.updatePersonAssertVersion = jest.fn().mockResolvedValue([undefined, []])
 
         // Add a person update to cache
-        await personStoreForBatch.updatePersonForUpdate(person, { properties: { new_value: 'new_value' } }, 'test')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            person,
+            { new_value: 'new_value' },
+            [],
+            {},
+            'test'
+        )
 
         // Flush should retry optimistically then fallback to direct update
         await personStoreForBatch.flush()
@@ -172,28 +242,32 @@ describe('BatchWritingPersonStore', () => {
     })
 
     it('should merge multiple updates for same person', async () => {
-        const personStoreForBatch = personStore.forBatch()
+        const personStoreForBatch = getBatchStoreForBatch()
 
         // First update
-        await personStoreForBatch.updatePersonForUpdate(person, { properties: { prop1: 'value1' } }, 'test')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(person, { prop1: 'value1' }, [], {}, 'test')
 
         // Second update to same person
-        await personStoreForBatch.updatePersonForUpdate(
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
             person,
-            { properties: { test: 'value2', prop2: 'value2' } },
+            { test: 'value2', prop2: 'value2' },
+            [],
+            {},
             'test'
         )
 
         // Check cache contains merged updates
-        const cache = (personStoreForBatch as any)['personUpdateCache']
-        const cachedUpdate = cache.get('1:test')
-        expect(cachedUpdate.properties).toEqual({ test: 'value2', prop1: 'value1', prop2: 'value2' }) // Second update overwrites
+        const cache = personStoreForBatch.getUpdateCache()
+        const cachedUpdate = cache.get(`${teamId}:${person.id}`)!
+        expect(cachedUpdate.properties).toEqual({ test: 'test' }) // Original properties from database
+        expect(cachedUpdate.properties_to_set).toEqual({ prop1: 'value1', test: 'value2', prop2: 'value2' }) // Merged properties to set
+        expect(cachedUpdate.properties_to_unset).toEqual([]) // No properties to unset
         expect(cachedUpdate.needs_write).toBe(true)
     })
 
     describe('fetchForUpdate vs fetchForChecking', () => {
         it('should use separate caches for update and checking', async () => {
-            const personStoreForBatch = personStore.forBatch()
+            const personStoreForBatch = getBatchStoreForBatch()
 
             // Fetch for checking should cache in check cache
             const personFromCheck = await personStoreForBatch.fetchForChecking(teamId, 'test-distinct')
@@ -207,12 +281,12 @@ describe('BatchWritingPersonStore', () => {
             expect(personFromUpdate).toBeDefined()
             expect(personFromUpdate!.id).toBe(person.id)
             expect(personFromUpdate!.team_id).toBe(person.team_id)
-            expect(personFromUpdate!.uuid).toBe(person.uuid)
+            expect(personFromUpdate!.id).toBe(person.id)
 
-            const updateCache = (personStoreForBatch as any)['personUpdateCache']
-            const cachedPersonUpdate = updateCache.get('1:test-distinct2')
+            const updateCache = personStoreForBatch.getUpdateCache()
+            const cachedPersonUpdate = updateCache.get(`${teamId}:${person.id}`)
             expect(cachedPersonUpdate).toBeDefined()
-            expect(cachedPersonUpdate.distinct_id).toBe('test-distinct2')
+            expect(cachedPersonUpdate!.distinct_id).toBe('test-distinct2')
         })
 
         it('should handle cache hits for both checking and updating', async () => {
@@ -271,12 +345,18 @@ describe('BatchWritingPersonStore', () => {
         db.updatePersonAssertVersion = jest.fn().mockImplementation(() => {
             callCount++
             if (callCount < 3) {
-                return Promise.resolve(undefined) // version mismatch
+                return Promise.resolve([undefined, []]) // version mismatch
             }
-            return Promise.resolve(5) // success on 3rd try
+            return Promise.resolve([5, []]) // success on 3rd try
         })
 
-        await personStoreForBatch.updatePersonForUpdate(person, { properties: { new_value: 'new_value' } }, 'test')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            person,
+            { new_value: 'new_value' },
+            [],
+            {},
+            'test'
+        )
         await personStoreForBatch.flush()
 
         expect(db.updatePersonAssertVersion).toHaveBeenCalledTimes(3)
@@ -290,9 +370,15 @@ describe('BatchWritingPersonStore', () => {
         const personStoreForBatch = assertVersionStore.forBatch()
 
         // Mock to always fail optimistic updates
-        db.updatePersonAssertVersion = jest.fn().mockResolvedValue(undefined)
+        db.updatePersonAssertVersion = jest.fn().mockResolvedValue([undefined, []])
 
-        await personStoreForBatch.updatePersonForUpdate(person, { properties: { new_value: 'new_value' } }, 'test')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            person,
+            { new_value: 'new_value' },
+            [],
+            {},
+            'test'
+        )
         await personStoreForBatch.flush()
 
         // Should try optimistic update multiple times based on config
@@ -310,15 +396,15 @@ describe('BatchWritingPersonStore', () => {
             properties: { existing_prop: 'existing_value', shared_prop: 'old_value' },
         }
 
-        db.updatePersonAssertVersion = jest.fn().mockResolvedValue(undefined) // Always fail
+        db.updatePersonAssertVersion = jest.fn().mockResolvedValue([undefined, []]) // Always fail, but we don't care about the version
         db.fetchPerson = jest.fn().mockResolvedValue(latestPerson)
 
         // Update with new properties
-        await personStoreForBatch.updatePersonForUpdate(
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
             person,
-            {
-                properties: { new_prop: 'new_value', shared_prop: 'new_value' },
-            },
+            { new_prop: 'new_value', shared_prop: 'new_value' },
+            [],
+            {},
             'test'
         )
 
@@ -346,7 +432,13 @@ describe('BatchWritingPersonStore', () => {
 
         db.updatePerson = jest.fn().mockRejectedValue(new Error('Database connection failed'))
 
-        await personStoreForBatch.updatePersonForUpdate(person, { properties: { new_value: 'new_value' } }, 'test')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            person,
+            { new_value: 'new_value' },
+            [],
+            {},
+            'test'
+        )
 
         await expect(personStoreForBatch.flush()).rejects.toThrow('Database connection failed')
     })
@@ -356,8 +448,8 @@ describe('BatchWritingPersonStore', () => {
 
         // Set up multiple updates
         const person2 = { ...person, id: '2', uuid: '2' }
-        await personStoreForBatch.updatePersonForUpdate(person, { properties: { test: 'value1' } }, 'test1')
-        await personStoreForBatch.updatePersonForUpdate(person2, { properties: { test: 'value2' } }, 'test2')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(person, { test: 'value1' }, [], {}, 'test1')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(person2, { test: 'value2' }, [], {}, 'test2')
 
         // Mock first update to succeed, second to fail
         let callCount = 0
@@ -373,52 +465,56 @@ describe('BatchWritingPersonStore', () => {
     })
 
     it('should handle clearing cache for different team IDs', async () => {
-        const personStoreForBatch = personStore.forBatch()
-        const person2 = { ...person, team_id: 2 }
+        const personStoreForBatch = getBatchStoreForBatch()
+        const person2 = { ...person, id: 'person2-id', uuid: 'person2-uuid', team_id: 2 }
 
         // Add to both caches for different teams
-        const updateCache = (personStoreForBatch as any)['personUpdateCache']
-        const checkCache = (personStoreForBatch as any)['personCheckCache']
+        const updateCache = personStoreForBatch.getUpdateCache()
+        const checkCache = personStoreForBatch.getCheckCache()
 
-        updateCache.set('1:test', fromInternalPerson(person, 'test'))
-        updateCache.set('2:test', fromInternalPerson(person2, 'test'))
-        checkCache.set('1:test', person)
-        checkCache.set('2:test', person2)
+        updateCache.set(`${person.team_id}:${person.id}`, fromInternalPerson(person, 'test'))
+        updateCache.set(`${person2.team_id}:${person2.id}`, fromInternalPerson(person2, 'test'))
+        checkCache.set(`${person.team_id}:test`, person)
+        checkCache.set(`${person2.team_id}:test`, person2)
+        personStoreForBatch.setDistinctIdToPersonId(person.team_id, 'test', person.id)
+        personStoreForBatch.setDistinctIdToPersonId(person2.team_id, 'test', person2.id)
 
         // Delete person from team 1
         await personStoreForBatch.deletePerson(person, 'test')
 
         // Only team 1 entries should be removed
-        expect(updateCache.has('1:test')).toBe(false)
-        expect(updateCache.has('2:test')).toBe(true)
-        expect(checkCache.has('1:test')).toBe(false)
-        expect(checkCache.has('2:test')).toBe(true)
+        expect(updateCache.has(`${person.team_id}:${person.id}`)).toBe(false)
+        expect(updateCache.has(`${person2.team_id}:${person2.id}`)).toBe(true)
+        expect(checkCache.has(`${person.team_id}:test`)).toBe(false)
+        expect(checkCache.has(`${person2.team_id}:test`)).toBe(true)
     })
 
     it('should handle empty properties updates', async () => {
-        const personStoreForBatch = personStore.forBatch()
+        const personStoreForBatch = getBatchStoreForBatch()
 
-        const result = await personStoreForBatch.updatePersonForUpdate(person, {}, 'test')
+        const result = await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(person, {}, [], {}, 'test')
         expect(result[0]).toEqual(person) // Should return original person unchanged
 
-        const cache = (personStoreForBatch as any)['personUpdateCache']
-        const cachedUpdate = cache.get('1:test')
+        const cache = personStoreForBatch.getUpdateCache()
+        const cachedUpdate = cache.get(`${teamId}:${person.id}`)!
         expect(cachedUpdate.needs_write).toBe(true) // Still marked for write
     })
 
     it('should handle null and undefined property values', async () => {
-        const personStoreForBatch = personStore.forBatch()
+        const personStoreForBatch = getBatchStoreForBatch()
 
-        await personStoreForBatch.updatePersonForUpdate(
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
             person,
-            { properties: { null_prop: null, undefined_prop: undefined } },
+            { null_prop: null, undefined_prop: undefined },
+            [],
+            {},
             'test'
         )
 
-        const cache = (personStoreForBatch as any)['personUpdateCache']
-        const cachedUpdate = cache.get('1:test')
-        expect(cachedUpdate.properties.null_prop).toBeNull()
-        expect(cachedUpdate.properties.undefined_prop).toBeUndefined()
+        const cache = personStoreForBatch.getUpdateCache()
+        const cachedUpdate = cache.get(`${teamId}:${person.id}`)!
+        expect(cachedUpdate.properties_to_set.null_prop).toBeNull()
+        expect(cachedUpdate.properties_to_set.undefined_prop).toBeUndefined()
 
         await personStoreForBatch.flush()
 
@@ -439,7 +535,13 @@ describe('BatchWritingPersonStore', () => {
         db.updatePerson = jest.fn().mockRejectedValue(new MessageSizeTooLarge('test', new Error('test')))
 
         // Add a person update to cache
-        await personStoreForBatch.updatePersonForUpdate(person, { properties: { new_value: 'new_value' } }, 'test')
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            person,
+            { new_value: 'new_value' },
+            [],
+            {},
+            'test'
+        )
 
         // Flush should handle the error and capture warning
         await personStoreForBatch.flush()
@@ -450,7 +552,7 @@ describe('BatchWritingPersonStore', () => {
             teamId,
             'person_upsert_message_size_too_large',
             {
-                personUuid: person.uuid,
+                personId: person.id,
                 distinctId: 'test',
             }
         )
@@ -462,9 +564,11 @@ describe('BatchWritingPersonStore', () => {
                 const personStore = new BatchWritingPersonsStore(db, { dbWriteMode: 'NO_ASSERT' })
                 const personStoreForBatch = personStore.forBatch()
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
                 await personStoreForBatch.flush()
@@ -480,14 +584,16 @@ describe('BatchWritingPersonStore', () => {
 
                 db.updatePerson = jest.fn().mockRejectedValue(new Error('Database error'))
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
 
                 await expect(personStoreForBatch.flush()).rejects.toThrow('Database error')
-                expect(db.updatePerson).toHaveBeenCalledTimes(2) // 1 for update, 1 for fallback
+                expect(db.updatePerson).toHaveBeenCalledTimes(6) // 5 for update, 1 for fallback
                 expect(db.updatePersonAssertVersion).not.toHaveBeenCalled()
             })
         })
@@ -497,11 +603,13 @@ describe('BatchWritingPersonStore', () => {
                 const personStore = new BatchWritingPersonsStore(db, { dbWriteMode: 'ASSERT_VERSION' })
                 const personStoreForBatch = personStore.forBatch()
 
-                db.updatePersonAssertVersion = jest.fn().mockResolvedValue(5) // success
+                db.updatePersonAssertVersion = jest.fn().mockResolvedValue([5, []]) // success
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
                 await personStoreForBatch.flush()
@@ -519,11 +627,13 @@ describe('BatchWritingPersonStore', () => {
                 const personStoreForBatch = personStore.forBatch()
 
                 // Mock to always fail optimistic updates
-                db.updatePersonAssertVersion = jest.fn().mockResolvedValue(undefined)
+                db.updatePersonAssertVersion = jest.fn().mockResolvedValue([undefined, []])
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
                 await personStoreForBatch.flush()
@@ -540,9 +650,11 @@ describe('BatchWritingPersonStore', () => {
                     .fn()
                     .mockRejectedValue(new MessageSizeTooLarge('test', new Error('test')))
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
                 await personStoreForBatch.flush()
@@ -553,7 +665,7 @@ describe('BatchWritingPersonStore', () => {
                     teamId,
                     'person_upsert_message_size_too_large',
                     {
-                        personUuid: person.uuid,
+                        personId: person.id,
                         distinctId: 'test',
                     }
                 )
@@ -566,9 +678,11 @@ describe('BatchWritingPersonStore', () => {
                 const personStore = new BatchWritingPersonsStore(db, { dbWriteMode: 'WITH_TRANSACTION' })
                 const personStoreForBatch = personStore.forBatch()
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
                 await personStoreForBatch.flush()
@@ -599,9 +713,11 @@ describe('BatchWritingPersonStore', () => {
                     return await transactionCallback({}) // success on second try
                 })
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
                 await personStoreForBatch.flush()
@@ -618,9 +734,11 @@ describe('BatchWritingPersonStore', () => {
                     .fn()
                     .mockRejectedValue(new MessageSizeTooLarge('test', new Error('test')))
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
                 await personStoreForBatch.flush()
@@ -630,7 +748,7 @@ describe('BatchWritingPersonStore', () => {
                     teamId,
                     'person_upsert_message_size_too_large',
                     {
-                        personUuid: person.uuid,
+                        personId: person.id,
                         distinctId: 'test',
                     }
                 )
@@ -647,9 +765,11 @@ describe('BatchWritingPersonStore', () => {
                 // Mock transaction to always fail
                 db.postgres.transaction = jest.fn().mockRejectedValue(new Error('Transaction failed'))
 
-                await personStoreForBatch.updatePersonForUpdate(
+                await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
                     person,
-                    { properties: { new_value: 'new_value' } },
+                    { new_value: 'new_value' },
+                    [],
+                    {},
                     'test'
                 )
                 await personStoreForBatch.flush()
@@ -671,13 +791,21 @@ describe('BatchWritingPersonStore', () => {
                 const person2 = { ...person, id: '2', uuid: '2' }
 
                 // Mock successful updates
-                db.updatePersonAssertVersion = jest.fn().mockResolvedValue(5)
+                db.updatePersonAssertVersion = jest.fn().mockResolvedValue([5, []])
 
                 await Promise.all([
-                    noAssertBatch.updatePersonForUpdate(person, { properties: { mode: 'no_assert' } }, 'test1'),
-                    assertVersionBatch.updatePersonForUpdate(
+                    noAssertBatch.updatePersonWithPropertiesDiffForUpdate(
+                        person,
+                        { mode: 'no_assert' },
+                        [],
+                        {},
+                        'test1'
+                    ),
+                    assertVersionBatch.updatePersonWithPropertiesDiffForUpdate(
                         person2,
-                        { properties: { mode: 'assert_version' } },
+                        { mode: 'assert_version' },
+                        [],
+                        {},
                         'test2'
                     ),
                 ])
@@ -722,17 +850,19 @@ describe('BatchWritingPersonStore', () => {
         // Completely replace the mock from beforeEach
         db.updatePersonAssertVersion = jest
             .fn()
-            .mockResolvedValueOnce(undefined) // First call fails (version mismatch)
-            .mockResolvedValueOnce(3) // Second call succeeds with new version
+            .mockResolvedValueOnce([undefined, []]) // First call fails (version mismatch)
+            .mockResolvedValueOnce([3, []]) // Second call succeeds with new version
 
         // Mock fetchPerson to return the updated person when called during conflict resolution
         db.fetchPerson = jest.fn().mockResolvedValue(updatedByOtherPod)
 
         // Process an event that will override one of the properties
         // We pass the initial person directly, so no initial fetch is needed
-        await personStoreForBatch.updatePersonForUpdate(
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
             initialPerson,
-            { properties: { existing_prop2: 'updated_by_this_pod' } },
+            { existing_prop2: 'updated_by_this_pod' },
+            [],
+            {},
             'test'
         )
 
@@ -756,10 +886,338 @@ describe('BatchWritingPersonStore', () => {
                     existing_prop1: 'updated_by_other_pod', // Preserved from other pod's update
                     existing_prop2: 'updated_by_this_pod', // Updated by this pod
                 },
-                property_changeset: {
-                    existing_prop2: 'updated_by_this_pod', // Only the changed property should be in changeset
+                properties_to_set: {
+                    existing_prop2: 'updated_by_this_pod', // Only the changed property should be in properties_to_set
                 },
+                properties_to_unset: [], // No properties to unset
             })
         )
+    })
+
+    it('should consolidate updates for same person via different distinct IDs', async () => {
+        // This test validates that when two distinct IDs point to the same person,
+        // updates via both distinct IDs should be merged into a single person update
+        const personStoreForBatch = getBatchStoreForBatch()
+
+        const distinctId1 = 'user-email@example.com'
+        const distinctId2 = 'user-device-abc123'
+
+        // Both distinct IDs point to the same person
+        const sharedPerson = {
+            ...person,
+            properties: {
+                initial_prop: 'initial_value',
+            },
+        }
+
+        // Mock fetchPerson to return the same person for both distinct IDs
+        db.fetchPerson = jest.fn().mockImplementation(() => {
+            return Promise.resolve(sharedPerson)
+        })
+
+        // Update via first distinct ID
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            sharedPerson,
+            { prop_from_distinctId1: 'value1' },
+            [],
+            {},
+            distinctId1
+        )
+
+        // Update via second distinct ID
+        await personStoreForBatch.updatePersonWithPropertiesDiffForUpdate(
+            sharedPerson,
+            { prop_from_distinctId2: 'value2' },
+            [],
+            {},
+            distinctId2
+        )
+
+        const cache = personStoreForBatch.getUpdateCache()
+
+        const cacheKey = `${teamId}:${sharedPerson.id}`
+        const cacheValue = cache.get(cacheKey)
+        // Currently both cache entries exist, which is the problem
+        expect(cacheValue).toBeDefined()
+
+        // Both cache entries have the same person id but different properties
+        expect(cacheValue?.id).toBe(sharedPerson.id)
+        expect(cacheValue?.properties).toEqual({
+            initial_prop: 'initial_value',
+        }) // Original properties from database
+        expect(cacheValue?.properties_to_set).toEqual({
+            initial_prop: 'initial_value',
+            prop_from_distinctId1: 'value1',
+            prop_from_distinctId2: 'value2',
+        }) // Properties to set
+        expect(cacheValue?.properties_to_unset).toEqual([]) // Properties to unset
+
+        expect(cache.size).toBe(1)
+
+        // Flush should consolidate these into a single DB update
+        await personStoreForBatch.flush()
+
+        // ISSUE: Currently this will likely result in 2 separate DB calls for the same person
+        // or only one of the updates will be applied, leading to incomplete data
+        // expect(db.updatePerson).toHaveBeenCalledTimes(1)
+
+        // The updatePerson call should have the correct properties
+        expect(db.updatePerson).toHaveBeenCalledTimes(1)
+        expect(db.updatePerson).toHaveBeenCalledWith(
+            expect.objectContaining({
+                id: sharedPerson.id,
+                properties: {
+                    initial_prop: 'initial_value',
+                    prop_from_distinctId1: 'value1',
+                    prop_from_distinctId2: 'value2',
+                },
+            }),
+            expect.objectContaining({
+                id: sharedPerson.id,
+                properties: {
+                    initial_prop: 'initial_value',
+                    prop_from_distinctId1: 'value1',
+                    prop_from_distinctId2: 'value2',
+                },
+            }),
+            undefined,
+            'updatePersonNoAssert'
+        )
+    })
+
+    describe('moveDistinctIds', () => {
+        it('should preserve cached merged properties when moving distinct IDs', async () => {
+            const personStoreForBatch = getBatchStoreForBatch()
+
+            // Create target person with some initial properties
+            const targetPerson: InternalPerson = {
+                ...person,
+                id: 'target-id',
+                properties: {
+                    target_prop: 'target_value',
+                    existing_target_prop: 'existing_target_value',
+                },
+                version: 5,
+                is_identified: false,
+            }
+
+            const sourcePerson: InternalPerson = {
+                ...person,
+                id: 'source-id',
+                properties: {
+                    source_prop: 'source_value',
+                },
+                version: 4,
+                is_identified: true,
+            }
+
+            // Step 1: Cache the target person (simulating fetchForUpdate)
+            personStoreForBatch.setCachedPersonForUpdate(
+                teamId,
+                'target-distinct',
+                fromInternalPerson(targetPerson, 'target-distinct')
+            )
+
+            // Step 2: Update target person with merged properties (simulating updatePersonForMerge)
+            const mergeUpdate = {
+                properties: {
+                    source_prop: 'source_value',
+                    rich_property: 'rich_value',
+                    merged_from_source: 'merged_value',
+                },
+                is_identified: true,
+            }
+            await personStoreForBatch.updatePersonForMerge(targetPerson, mergeUpdate, 'target-distinct')
+
+            // Verify the merge worked - check the final computed result
+            const cacheAfterMerge = personStoreForBatch.getCachedPersonForUpdateByDistinctId(teamId, 'target-distinct')
+            expect(cacheAfterMerge?.properties).toEqual({
+                target_prop: 'target_value',
+                existing_target_prop: 'existing_target_value',
+            }) // Original properties from database
+            expect(cacheAfterMerge?.properties_to_set).toEqual({
+                source_prop: 'source_value',
+                rich_property: 'rich_value',
+                merged_from_source: 'merged_value',
+                target_prop: 'target_value',
+                existing_target_prop: 'existing_target_value',
+            }) // Properties to set
+            expect(cacheAfterMerge?.properties_to_unset).toEqual([]) // Properties to unset
+            expect(cacheAfterMerge?.is_identified).toBe(true)
+
+            // Step 3: moveDistinctIds - this should preserve the merged cache
+            await personStoreForBatch.moveDistinctIds(sourcePerson, targetPerson, 'target-distinct')
+
+            // Step 4: Verify that cached merged properties are preserved
+            const cacheAfterMove = personStoreForBatch.getCachedPersonForUpdateByDistinctId(teamId, 'target-distinct')
+            expect(cacheAfterMove?.properties).toEqual({
+                target_prop: 'target_value',
+                existing_target_prop: 'existing_target_value',
+            })
+            expect(cacheAfterMove?.properties_to_set).toEqual({
+                source_prop: 'source_value',
+                rich_property: 'rich_value',
+                merged_from_source: 'merged_value',
+                target_prop: 'target_value',
+                existing_target_prop: 'existing_target_value',
+            })
+            expect(cacheAfterMove?.properties_to_unset).toEqual([])
+            expect(cacheAfterMove?.is_identified).toBe(true)
+            expect(cacheAfterMove?.distinct_id).toBe('target-distinct')
+
+            // Verify the source cache is cleared
+            const sourceCacheAfterMove = personStoreForBatch.getCachedPersonForUpdateByPersonId(teamId, sourcePerson.id)
+            expect(sourceCacheAfterMove).toBeUndefined()
+        })
+
+        it('should create fresh cache when no existing cache exists', async () => {
+            const personStoreForBatch = getBatchStoreForBatch()
+
+            const targetPerson: InternalPerson = {
+                ...person,
+                id: 'target-id',
+                properties: {
+                    target_prop: 'target_value',
+                },
+                version: 5,
+            }
+
+            const sourcePerson: InternalPerson = {
+                ...person,
+                id: 'source-id',
+                properties: {
+                    source_prop: 'source_value',
+                },
+                version: 4,
+            }
+
+            // No existing cache for target person
+            expect(personStoreForBatch.getCachedPersonForUpdateByPersonId(teamId, targetPerson.id)).toBeUndefined()
+
+            // Move distinct IDs
+            await personStoreForBatch.moveDistinctIds(sourcePerson, targetPerson, 'target-distinct')
+
+            // Should create fresh cache from target person
+            const cacheAfterMove = personStoreForBatch.getCachedPersonForUpdateByDistinctId(teamId, 'target-distinct')
+            expect(cacheAfterMove?.properties).toEqual({
+                target_prop: 'target_value',
+            })
+            expect(cacheAfterMove?.id).toBe(targetPerson.id)
+            expect(cacheAfterMove?.distinct_id).toBe('target-distinct')
+        })
+
+        it('should clear source person cache', async () => {
+            const personStoreForBatch = getBatchStoreForBatch()
+
+            const targetPerson: InternalPerson = {
+                ...person,
+                id: 'target-id',
+                properties: { target_prop: 'target_value' },
+                version: 5,
+            }
+
+            const sourcePerson: InternalPerson = {
+                ...person,
+                id: 'source-id',
+                properties: { source_prop: 'source_value' },
+                version: 4,
+            }
+
+            // Set up cache for source person
+            personStoreForBatch.setCachedPersonForUpdate(
+                teamId,
+                'source-distinct',
+                fromInternalPerson(sourcePerson, 'source-distinct')
+            )
+
+            // Verify source cache exists
+            expect(personStoreForBatch.getCachedPersonForUpdateByPersonId(teamId, sourcePerson.id)).toBeDefined()
+
+            // Move distinct IDs
+            await personStoreForBatch.moveDistinctIds(sourcePerson, targetPerson, 'target-distinct')
+
+            // Verify source cache is cleared
+            expect(personStoreForBatch.getCachedPersonForUpdateByPersonId(teamId, sourcePerson.id)).toBeUndefined()
+        })
+
+        it('should handle complex merge scenario with multiple properties', async () => {
+            const personStoreForBatch = getBatchStoreForBatch()
+
+            const targetPerson: InternalPerson = {
+                ...person,
+                id: 'target-id',
+                properties: {
+                    target_prop: 'target_value',
+                    shared_prop: 'original_value',
+                    target_only: 'target_only_value',
+                },
+                version: 5,
+                is_identified: false,
+            }
+
+            const sourcePerson: InternalPerson = {
+                ...person,
+                id: 'source-id',
+                properties: {
+                    source_prop: 'source_value',
+                    shared_prop: 'updated_value',
+                    source_only: 'source_only_value',
+                },
+                version: 4,
+                is_identified: true,
+            }
+
+            // Step 1: Cache target person
+            personStoreForBatch.setCachedPersonForUpdate(
+                teamId,
+                'target-distinct',
+                fromInternalPerson(targetPerson, 'target-distinct')
+            )
+
+            // Step 2: Multiple merge operations
+            await personStoreForBatch.updatePersonForMerge(
+                targetPerson,
+                {
+                    properties: {
+                        source_prop: 'source_value',
+                        shared_prop: 'updated_value', // This should override
+                    },
+                    is_identified: true,
+                },
+                'target-distinct'
+            )
+
+            await personStoreForBatch.updatePersonForMerge(
+                targetPerson,
+                {
+                    properties: {
+                        additional_prop: 'additional_value',
+                        source_only: 'source_only_value',
+                    },
+                },
+                'target-distinct'
+            )
+
+            // Step 3: moveDistinctIds
+            await personStoreForBatch.moveDistinctIds(sourcePerson, targetPerson, 'target-distinct')
+
+            // Step 4: Verify all merged properties are preserved
+            const finalCache = personStoreForBatch.getCachedPersonForUpdateByDistinctId(teamId, 'target-distinct')
+            expect(finalCache?.properties).toEqual({
+                target_prop: 'target_value',
+                shared_prop: 'original_value',
+                target_only: 'target_only_value',
+            })
+            expect(finalCache?.is_identified).toBe(true)
+            expect(finalCache?.properties_to_set).toEqual({
+                source_prop: 'source_value',
+                shared_prop: 'updated_value',
+                additional_prop: 'additional_value',
+                source_only: 'source_only_value',
+                target_only: 'target_only_value',
+                target_prop: 'target_value',
+            })
+            expect(finalCache?.properties_to_unset).toEqual([])
+        })
     })
 })

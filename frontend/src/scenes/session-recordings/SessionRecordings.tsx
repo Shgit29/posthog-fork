@@ -1,6 +1,5 @@
-import { IconEllipsis, IconGear } from '@posthog/icons'
-import { IconOpenSidebar } from '@posthog/icons'
-import { LemonBadge, LemonButton, LemonMenu, LemonSwitch } from '@posthog/lemon-ui'
+import { IconEllipsis, IconGear, IconOpenSidebar } from '@posthog/icons'
+import { LemonBadge, LemonButton, LemonMenu } from '@posthog/lemon-ui'
 import { useActions, useValues } from 'kea'
 import { router } from 'kea-router'
 import {
@@ -11,7 +10,6 @@ import {
 import { FilmCameraHog, WarningHog } from 'lib/components/hedgehogs'
 import { PageHeader } from 'lib/components/PageHeader'
 import { ProductIntroduction } from 'lib/components/ProductIntroduction/ProductIntroduction'
-import { asyncSaveToModal } from 'lib/components/SaveTo/saveToLogic'
 import { VersionCheckerBanner } from 'lib/components/VersionChecker/VersionCheckerBanner'
 import { FEATURE_FLAGS } from 'lib/constants'
 import { useAsyncHandler } from 'lib/hooks/useAsyncHandler'
@@ -25,10 +23,8 @@ import { sessionRecordingsPlaylistLogic } from 'scenes/session-recordings/playli
 import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
 
-import { NotebookNodeType, ReplayTab, ReplayTabs } from '~/types'
-import { ProductKey } from '~/types'
+import { NotebookNodeType, ProductKey, ReplayTab, ReplayTabs } from '~/types'
 
-import { playerSettingsLogic } from './player/playerSettingsLogic'
 import { createPlaylist } from './playlist/playlistUtils'
 import { SessionRecordingsPlaylist } from './playlist/SessionRecordingsPlaylist'
 import { SavedSessionRecordingPlaylists } from './saved-playlists/SavedSessionRecordingPlaylists'
@@ -46,12 +42,7 @@ function Header(): JSX.Element {
     const { filters } = useValues(sessionRecordingsPlaylistLogic({ updateSearchParams: true }))
 
     const newPlaylistHandler = useAsyncHandler(async () => {
-        const folder = await asyncSaveToModal({ defaultFolder: 'Unfiled/Replay playlists' })
-        if (typeof folder === 'string') {
-            await createPlaylist({ _create_in_folder: folder, type: 'collection' }, true)
-        } else {
-            await createPlaylist({ type: 'collection' }, true)
-        }
+        await createPlaylist({ _create_in_folder: 'Unfiled/Replay playlists', type: 'collection' }, true)
         reportRecordingPlaylistCreated('new')
     })
 
@@ -250,44 +241,29 @@ const ReplayPageTabs: ReplayTab[] = [
 
 function PageTabs(): JSX.Element {
     const { tab, shouldShowNewBadge } = useValues(sessionReplaySceneLogic)
-    const { isZenMode } = useValues(playerSettingsLogic)
-    const { setIsZenMode } = useActions(playerSettingsLogic)
-    const { featureFlags } = useValues(featureFlagLogic)
 
     return (
-        <div className={`${featureFlags[FEATURE_FLAGS.REPLAY_ZEN_MODE] && 'flex justify-between items-center'}`}>
-            <LemonTabs
-                activeKey={tab}
-                className="flex"
-                onChange={(t) => router.actions.push(urls.replay(t as ReplayTabs))}
-                tabs={ReplayPageTabs.map((replayTab): LemonTab<string> => {
-                    return {
-                        label: (
-                            <>
-                                {replayTab.label}
-                                {replayTab.label === ReplayTabs.Templates && shouldShowNewBadge && (
-                                    <LemonBadge className="ml-1" size="small" />
-                                )}
-                            </>
-                        ),
-                        key: replayTab.key,
-                        tooltip: replayTab.tooltip,
-                        tooltipDocLink: replayTab.tooltipDocLink,
-                        'data-attr': replayTab['data-attr'],
-                    }
-                })}
-            />
-            {featureFlags[FEATURE_FLAGS.REPLAY_ZEN_MODE] && (
-                <div className="flex items-center gap-2">
-                    <LemonSwitch
-                        data-attr="opt-in-cinema-mode-switch"
-                        onChange={setIsZenMode}
-                        checked={isZenMode}
-                        label="Cinema mode"
-                    />
-                </div>
-            )}
-        </div>
+        <LemonTabs
+            activeKey={tab}
+            className="flex"
+            onChange={(t) => router.actions.push(urls.replay(t as ReplayTabs))}
+            tabs={ReplayPageTabs.map((replayTab): LemonTab<string> => {
+                return {
+                    label: (
+                        <>
+                            {replayTab.label}
+                            {replayTab.label === ReplayTabs.Templates && shouldShowNewBadge && (
+                                <LemonBadge className="ml-1" size="small" />
+                            )}
+                        </>
+                    ),
+                    key: replayTab.key,
+                    tooltip: replayTab.tooltip,
+                    tooltipDocLink: replayTab.tooltipDocLink,
+                    'data-attr': replayTab['data-attr'],
+                }
+            })}
+        />
     )
 }
 export function SessionsRecordings(): JSX.Element {
