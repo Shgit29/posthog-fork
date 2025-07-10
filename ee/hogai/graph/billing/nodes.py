@@ -1,5 +1,6 @@
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
+from datetime import datetime, timedelta
 from ee.hogai.graph.base import AssistantNode
 from ee.hogai.graph.billing.prompts import BILLING_CONTEXT_PROMPT
 from ee.hogai.utils.types import AssistantState, PartialAssistantState
@@ -22,7 +23,7 @@ class BillingNode(AssistantNode):
                 ]
             )
         formatted_billing_context = self._format_billing_context(billing_context)
-        tool_call_id = state.root_tool_call_id
+        tool_call_id = cast(str, state.root_tool_call_id)
         return PartialAssistantState(
             messages=[
                 AssistantToolCallMessage(content=formatted_billing_context, tool_call_id=tool_call_id, id=str(uuid4())),
@@ -68,7 +69,7 @@ class BillingNode(AssistantNode):
                     "type": product.type,
                     "description": product.description,
                     "current_usage": int(product.current_usage) if product.current_usage else None,
-                    "free_usage_limit": int(product.free_usage_limit) if product.free_usage_limit else None,
+                    "usage_limit": int(product.usage_limit) if product.usage_limit else None,
                     "percentage_usage": product.percentage_usage,
                     "has_exceeded_limit": product.has_exceeded_limit,
                     "custom_limit_usd": product.custom_limit_usd,
@@ -87,7 +88,6 @@ class BillingNode(AssistantNode):
                     "description": addon.description,
                     "current_usage": int(addon.current_usage) if addon.current_usage else None,
                     "usage_limit": int(addon.usage_limit) if addon.usage_limit else None,
-                    "subscribed": addon.subscribed,
                     "docs_url": addon.docs_url,
                 }
                 template_data["addons"].append(addon_data)
@@ -120,48 +120,7 @@ class BillingNode(AssistantNode):
         return template.format_prompt(**template_data).to_string()
 
     def _format_usage_history_table(self, usage_history) -> str:
-        """Format usage history timeseries data as a concise table."""
-        if not usage_history:
-            return ""
-
-        # If only one breakdown, format as simple weekly table
-        if len(usage_history) == 1:
-            return self._format_simple_weekly_table(usage_history[0])
-
-        # Multiple breakdowns - use horizontal compact format
-        return self._format_compact_weekly_breakdown_table(usage_history)
-
-    def _format_simple_weekly_table(self, result) -> str:
-        """Format single breakdown as simple weekly table."""
-        dates = result.dates
-        data = result.data
-
-        if not dates or not data:
-            return ""
-
-        # Create table - data is already weekly
-        table_lines = ["| Week | Usage |", "|------|-------|"]
-        for date, usage in zip(dates, data):
-            # Convert date to week date range format
-            from datetime import datetime, timedelta
-
-            try:
-                date_obj = datetime.strptime(date, "%Y-%m-%d")
-                # Calculate the start of the week (Monday)
-                days_since_monday = date_obj.weekday()
-                week_start = date_obj - timedelta(days=days_since_monday)
-                week_end = week_start + timedelta(days=6)
-                week_range = f"{week_start.strftime('%b %d')} - {week_end.strftime('%b %d, %Y')}"
-                table_lines.append(f"| {week_range} | {usage:,} |")
-            except (ValueError, TypeError):
-                # Fallback to original date format if parsing fails
-                table_lines.append(f"| {date} | {usage:,} |")
-
-        return "\n".join(table_lines)
-
-    def _format_compact_weekly_breakdown_table(self, usage_history) -> str:
         """Format multiple breakdowns as compact weekly breakdown table."""
-        from datetime import datetime
 
         # Create dynamic header with breakdown columns
         breakdown_names = [result.breakdown_value or "Unknown" for result in usage_history]
@@ -171,9 +130,9 @@ class BillingNode(AssistantNode):
         table_lines = [header, separator]
 
         # Get all unique weeks across all breakdowns
-        all_weeks = set()
-        breakdown_data = {}
-        week_date_mapping = {}  # Maps week_key to actual date range
+        all_weeks: set[str] = set()
+        breakdown_data: dict[int, dict[str, float]] = {}
+        week_date_mapping: dict[str, str] = {}  # Maps week_key to actual date range
 
         for i, result in enumerate(usage_history):
             breakdown_data[i] = {}
@@ -182,8 +141,6 @@ class BillingNode(AssistantNode):
                     try:
                         date_obj = datetime.strptime(date, "%Y-%m-%d")
                         # Calculate the start of the week (Monday)
-                        from datetime import timedelta
-
                         days_since_monday = date_obj.weekday()
                         week_start = date_obj - timedelta(days=days_since_monday)
                         week_end = week_start + timedelta(days=6)
@@ -238,8 +195,11 @@ class BillingNode(AssistantNode):
             """
 
             results = sync_execute(query, {"team_id": self._team.id})
-
-            return [{"event": row[0], "count": int(row[1]), "formatted_count": f"{int(row[1]):,}"} for row in results]
+            if isinstance(results, list):
+                return [
+                    {"event": row[0], "count": int(row[1]), "formatted_count": f"{int(row[1]):,}"} for row in results
+                ]
+            return []
         except Exception:
             # If query fails, return empty list
             return []

@@ -21,7 +21,7 @@ export interface MaxProductInfo {
     is_used: boolean // current_usage > 0
     has_exceeded_limit: boolean
     current_usage?: number
-    free_usage_limit?: number | null
+    usage_limit?: number | null
     percentage_usage: number
     custom_limit_usd?: number | null
     next_period_custom_limit_usd?: number | null
@@ -34,10 +34,9 @@ export interface MaxAddonInfo {
     name: string
     description: string
     is_used: boolean // current_usage > 0
-    subscribed: boolean
     has_exceeded_limit: boolean
     current_usage: number
-    free_usage_limit?: number | null
+    usage_limit?: number | null
     percentage_usage?: number
     custom_limit_usd?: number | null
     next_period_custom_limit_usd?: number | null

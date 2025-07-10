@@ -1639,14 +1639,13 @@ class MaxAddonInfo(BaseModel):
     custom_limit_usd: Optional[float] = None
     description: str
     docs_url: Optional[str] = None
-    free_usage_limit: Optional[float] = None
     has_exceeded_limit: bool
     is_used: bool
     name: str
     next_period_custom_limit_usd: Optional[float] = None
     percentage_usage: Optional[float] = None
-    subscribed: bool
     type: str
+    usage_limit: Optional[float] = None
 
 
 class Interval(StrEnum):
@@ -1723,13 +1722,13 @@ class MaxProductInfo(BaseModel):
     custom_limit_usd: Optional[float] = None
     description: str
     docs_url: Optional[str] = None
-    free_usage_limit: Optional[float] = None
     has_exceeded_limit: bool
     is_used: bool
     name: str
     next_period_custom_limit_usd: Optional[float] = None
     percentage_usage: float
     type: str
+    usage_limit: Optional[float] = None
 
 
 class MinimalHedgehogConfig(BaseModel):

@@ -34,7 +34,7 @@ The user has {{subscription_level}} subscription{{#billing_plan}} ({{billing_pla
 {{#description}}
 - Description: {{description}}
 {{/description}}
-- Current usage: {{current_usage}}{{#free_usage_limit}} of {{free_usage_limit}} limit{{/free_usage_limit}} ({{percentage_usage}}% of limit)
+- Current usage: {{current_usage}}{{#usage_limit}} of {{usage_limit}} limit{{/usage_limit}} ({{percentage_usage}}% of limit)
 {{#has_exceeded_limit}}
 - ⚠️ Usage limit exceeded
 {{/has_exceeded_limit}}
@@ -59,12 +59,6 @@ The user has {{subscription_level}} subscription{{#billing_plan}} ({{billing_pla
 {{#description}}
 - Description: {{description}}
 {{/description}}
-{{#subscribed}}
-- Addon is active
-{{/subscribed}}
-{{^subscribed}}
-- Addon is inactive
-{{/subscribed}}
 {{#current_usage}}
 - Current usage: {{current_usage}}{{#usage_limit}} of {{usage_limit}} limit{{/usage_limit}}
 {{/current_usage}}
@@ -124,6 +118,7 @@ When users ask about reducing costs, analyze their billing situation and usage d
 6. **Usage patterns**: Identify event types that are driving high usage and correlate them to active products and add-ons. It's useful to show the user a recap of the top 20 events by usage. Events starting with `$` are PostHog defaults.
 7. **$pageview and $pageleave**: PostHog automatically captures $pageview and $pageleave. This is great for analytics, but it may capture more events than you need. You can disable these events and capturing them manually for the pages you need instead, by adding `capture_pageview: false` and `capture_pageleave: false` to your PostHog init() call.
 8. **Limits and sampling**: Custom spending limits and sampling can be used to reduce costs.
+9. **Special events**: Some special events starting with `$`, for example `$feature_flag_called`, $exception, $survey events, are not billed in the product analytics product, but in their respective products, in this case feature flags, error tracking, and surveys.
 There is a full list of cost reduction strategies at: https://posthog.com/docs/product-analytics/cutting-costs
 Do not give the user a generic list of strategies, be analytical and suggest data-driven solutions, referencing actual user data.
 If the suggestions are not connected to the user's billing situation, do not suggest them.

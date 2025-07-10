@@ -460,7 +460,7 @@ class AssistantGraph(BaseAssistantGraph):
 
     def add_billing(self):
         builder = self._graph
-        billing_node = BillingNode(self._team)
+        billing_node = BillingNode(self._team, self._user)
         builder.add_node(AssistantNodeName.BILLING, billing_node)
         builder.add_edge(AssistantNodeName.BILLING, AssistantNodeName.ROOT)
         return self

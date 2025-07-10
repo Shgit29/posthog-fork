@@ -14500,9 +14500,6 @@
                 "docs_url": {
                     "type": "string"
                 },
-                "free_usage_limit": {
-                    "type": ["number", "null"]
-                },
                 "has_exceeded_limit": {
                     "type": "boolean"
                 },
@@ -14518,14 +14515,14 @@
                 "percentage_usage": {
                     "type": "number"
                 },
-                "subscribed": {
-                    "type": "boolean"
-                },
                 "type": {
                     "type": "string"
+                },
+                "usage_limit": {
+                    "type": ["number", "null"]
                 }
             },
-            "required": ["type", "name", "description", "is_used", "subscribed", "has_exceeded_limit", "current_usage"],
+            "required": ["type", "name", "description", "is_used", "has_exceeded_limit", "current_usage"],
             "type": "object"
         },
         "MaxBillingContext": {
@@ -14792,9 +14789,6 @@
                 "docs_url": {
                     "type": "string"
                 },
-                "free_usage_limit": {
-                    "type": ["number", "null"]
-                },
                 "has_exceeded_limit": {
                     "type": "boolean"
                 },
@@ -14812,6 +14806,9 @@
                 },
                 "type": {
                     "type": "string"
+                },
+                "usage_limit": {
+                    "type": ["number", "null"]
                 }
             },
             "required": ["type", "name", "description", "is_used", "has_exceeded_limit", "percentage_usage"],
