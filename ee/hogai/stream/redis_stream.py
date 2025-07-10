@@ -166,7 +166,7 @@ class RedisStream:
     async def read_stream(
         self,
         start_id: str = "0",
-        block_ms: int = 100,  # Block for 100ms waiting for new messages
+        block_ms: int = 50,  # Block for 50ms waiting for new messages
         count: Optional[int] = REDIS_STREAM_CONCURRENT_READ_COUNT,
     ) -> AsyncGenerator[RedisStreamEvent, None]:
         """
