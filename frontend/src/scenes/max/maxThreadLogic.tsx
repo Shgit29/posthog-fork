@@ -70,11 +70,7 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
         }
 
         // New messages have been added since we last updated the thread
-        if (
-            !values.streamingActive &&
-            props.conversation.messages.length > values.threadMessageCount &&
-            values.threadRaw.length === 0
-        ) {
+        if (!values.streamingActive && props.conversation.messages.length > values.threadMessageCount) {
             actions.setThread(
                 props.conversation.messages.map((message) => ({
                     ...message,
@@ -109,6 +105,7 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                 'setActiveStreamingThreads',
                 'setConversationId',
                 'setAutoRun',
+                'loadConversationHistorySuccess',
             ],
         ],
     })),
@@ -280,19 +277,8 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                                 title: parsedResponse.title || 'New chat',
                             }
 
-                            // Set the mapping of conversation ID and thread ID for new conversations
-                            if (!streamData.content && !values.threadKeys[props.conversationId]) {
-                                actions.setThreadKey(parsedResponse.id, props.conversationId)
-                            }
-
                             actions.setConversation(conversationWithTitle)
                             actions.updateGlobalConversationCache(conversationWithTitle)
-
-                            // For new conversations, the frontend ID should match the backend ID
-                            if (!streamData.conversation) {
-                                // Backend should use the frontend-provided ID, so this should match
-                                actions.setConversationId(parsedResponse.id)
-                            }
                         } else if (event === AssistantEventType.Message) {
                             const parsedResponse = parseResponse<RootAssistantMessage>(data)
                             if (!parsedResponse) {
@@ -321,13 +307,6 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                                     ...parsedResponse,
                                     status: 'completed',
                                 })
-                            } else if (parsedResponse.type === AssistantMessageType.Failure) {
-                                // Handle failure messages - reset streaming state
-                                actions.addMessage({
-                                    ...parsedResponse,
-                                    status: 'completed',
-                                })
-                                actions.setActiveStreamingThreads(-1)
                             } else if (
                                 values.threadRaw[values.threadRaw.length - 1]?.status === 'completed' ||
                                 values.threadRaw.length === 0
@@ -350,7 +329,6 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
 
                             if (parsedResponse.type === AssistantGenerationStatusType.GenerationError) {
                                 actions.setMessageStatus(values.threadRaw.length - 1, 'error')
-                                actions.setActiveStreamingThreads(-1)
                             }
                         }
                     },
@@ -365,7 +343,6 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                 }
             } catch (e) {
                 if (!(e instanceof DOMException) || e.name !== 'AbortError') {
-                    actions.setActiveStreamingThreads(-1)
                     const relevantErrorMessage = { ...FAILURE_MESSAGE, id: uuid() } // Generic message by default
 
                     // Prevents parallel generation attempts. Total wait time is: 21 seconds.
@@ -470,6 +447,16 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             if (values.selectedConversationId !== values.conversationId && cache.unmount) {
                 cache.unmount()
             }
+        },
+
+        loadConversationHistorySuccess: ({ payload }) => {
+            if (payload?.doNotUpdateCurrentThread || values.autoRun) {
+                return
+            }
+
+            setTimeout(() => {
+                actions.reconnectToStream()
+            }, 0)
         },
     })),
 

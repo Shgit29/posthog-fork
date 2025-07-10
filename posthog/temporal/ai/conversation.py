@@ -1,29 +1,29 @@
-import time
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Optional
 from uuid import UUID
 
+import structlog
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 from ee.hogai.assistant import Assistant
-from ee.hogai.utils.sse import AssistantSSESerializer
+from ee.hogai.stream.redis_stream import RedisStream
 from ee.hogai.utils.types import AssistantMode
 from ee.models import Conversation
 from posthog.models import Team, User
-from posthog.redis import get_async_client
 from posthog.schema import HumanMessage
 from posthog.temporal.common.base import PostHogWorkflow
 
+logger = structlog.get_logger(__name__)
+
 CONVERSATION_STREAM_PREFIX = "conversation_updates:"
-REDIS_STREAM_MAX_LENGTH = 1000  # Maximum number of messages to keep in stream
-REDIS_STREAM_EXPIRATION_TIME = 30 * 60  # 30 minutes
 
 
 @dataclass
-class ConversationInputs:
+class AssistantConversationRunnerWorkflowInputs:
     """Inputs for the conversation processing workflow."""
 
     team_id: int
@@ -37,20 +37,18 @@ class ConversationInputs:
 
 
 @workflow.defn(name="conversation-processing")
-class ConversationWorkflow(PostHogWorkflow):
+class AssistantConversationRunnerWorkflow(PostHogWorkflow):
     """Temporal workflow for processing AI conversations asynchronously."""
 
     @staticmethod
-    def parse_inputs(inputs: list[str]) -> ConversationInputs:
+    def parse_inputs(inputs: list[str]) -> AssistantConversationRunnerWorkflowInputs:
         """Parse inputs from the management command CLI."""
         loaded = json.loads(inputs[0])
-        return ConversationInputs(**loaded)
+        return AssistantConversationRunnerWorkflowInputs(**loaded)
 
     @workflow.run
-    async def run(self, inputs: ConversationInputs) -> None:
+    async def run(self, inputs: AssistantConversationRunnerWorkflowInputs) -> None:
         """Execute the conversation processing workflow."""
-
-        # Process the conversation with retries
         await workflow.execute_activity(
             process_conversation_activity,
             inputs,
@@ -64,19 +62,18 @@ class ConversationWorkflow(PostHogWorkflow):
 
 
 @activity.defn
-async def process_conversation_activity(inputs: ConversationInputs) -> None:
-    """Asynchronous conversation processing function that streams chunks immediately."""
+async def process_conversation_activity(inputs: AssistantConversationRunnerWorkflowInputs) -> None:
+    """Asynchronous conversation processing function that streams chunks immediately.
 
-    try:
-        team = await Team.objects.aget(id=inputs.team_id)
-        user = await User.objects.aget(id=inputs.user_id)
-        conversation = await Conversation.objects.aget(id=inputs.conversation_id)
-    except Team.DoesNotExist:
-        raise ValueError(f"Team {inputs.team_id} not found")
-    except User.DoesNotExist:
-        raise ValueError(f"User {inputs.user_id} not found")
-    except Conversation.DoesNotExist:
-        raise ValueError(f"Conversation {inputs.conversation_id} not found")
+    Args:
+        inputs: Temporal workflow inputs
+    """
+
+    team, user, conversation = await asyncio.gather(
+        Team.objects.aget(id=inputs.team_id),
+        User.objects.aget(id=inputs.user_id),
+        Conversation.objects.aget(id=inputs.conversation_id),
+    )
 
     human_message = HumanMessage.model_validate(inputs.message) if inputs.message else None
 
@@ -92,50 +89,8 @@ async def process_conversation_activity(inputs: ConversationInputs) -> None:
     )
 
     stream_key = get_conversation_stream_key(inputs.conversation_id)
-    redis_client = get_async_client()
-
-    def get_timestamp_ms() -> str:
-        """Get current timestamp in milliseconds as string."""
-        return str(int(time.time() * 1000))
-
-    try:
-        serializer = AssistantSSESerializer()
-        async for chunk in assistant.astream():
-            # Add chunk to Redis stream immediately
-            await redis_client.xadd(
-                stream_key,
-                {"data": serializer.dumps(chunk), "timestamp": get_timestamp_ms()},
-                maxlen=REDIS_STREAM_MAX_LENGTH,
-                approximate=True,
-            )
-
-        # Mark the stream as complete
-        await redis_client.xadd(
-            stream_key,
-            {"status": "complete", "timestamp": get_timestamp_ms()},
-            maxlen=REDIS_STREAM_MAX_LENGTH,
-            approximate=True,
-        )
-
-        # Set stream expiration (30 minutes)
-        await redis_client.expire(stream_key, REDIS_STREAM_EXPIRATION_TIME)
-
-    except Exception as e:
-        # Mark the stream as failed
-        await redis_client.xadd(
-            stream_key,
-            {
-                "status": "error",
-                "error": str(e),
-                "timestamp": get_timestamp_ms(),
-            },
-            maxlen=REDIS_STREAM_MAX_LENGTH,
-            approximate=True,
-        )
-
-        raise
-    finally:
-        await redis_client.close()
+    redis_stream = RedisStream(stream_key)
+    await redis_stream.write_to_stream(assistant.astream())
 
 
 def get_conversation_stream_key(conversation_id: UUID) -> str:

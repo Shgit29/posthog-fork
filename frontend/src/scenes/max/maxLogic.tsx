@@ -19,7 +19,6 @@ import { Conversation, ConversationDetail, ConversationStatus, SidePanelTab } fr
 import { maxContextLogic } from './maxContextLogic'
 import { maxGlobalLogic } from './maxGlobalLogic'
 import type { maxLogicType } from './maxLogicType'
-import { maxThreadLogic } from './maxThreadLogic'
 
 export type MessageStatus = 'loading' | 'completed' | 'error'
 
@@ -93,11 +92,6 @@ export const maxLogic = kea<maxLogicType>([
          * Prepend a conversation to the conversation history or update it in place.
          */
         prependOrReplaceConversation: (conversation: ConversationDetail | Conversation) => ({ conversation }),
-
-        /**
-         * Reconnect to an in-progress conversation stream.
-         */
-        reconnectToInProgressConversation: (conversation: ConversationDetail) => ({ conversation }),
     }),
 
     defaults({
@@ -266,15 +260,15 @@ export const maxLogic = kea<maxLogicType>([
         ],
 
         chatTitle: [
-            (s) => [s.conversationId, s.conversation, s.conversationHistoryVisible],
-            (conversationId, conversation, conversationHistoryVisible) => {
+            (s) => [s.conversation, s.conversationHistoryVisible],
+            (conversation, conversationHistoryVisible) => {
                 if (conversationHistoryVisible) {
                     return 'Chat history'
                 }
 
                 // Existing conversation or the first generation is in progress
-                if (conversation || conversationId) {
-                    return conversation?.title ?? 'New chat'
+                if (conversation) {
+                    return conversation.title ?? 'New chat'
                 }
 
                 return 'Max AI'
@@ -323,17 +317,6 @@ export const maxLogic = kea<maxLogicType>([
             // after the history has been loaded.
             if (conversation) {
                 actions.scrollThreadToBottom('instant')
-                if (
-                    conversation.status === ConversationStatus.InProgress &&
-                    conversation.messages &&
-                    conversation.messages.length > 0
-                ) {
-                    // Only reconnect for existing conversations with message history
-                    // New conversations should use the normal askMax flow, not reconnection
-                    setTimeout(() => {
-                        actions.reconnectToInProgressConversation(conversation)
-                    }, 0)
-                }
             } else {
                 // If the conversation is not found, retrieve once the conversation status and reset if 404.
                 actions.pollConversation(values.conversationId, 0, 0)
@@ -405,19 +388,6 @@ export const maxLogic = kea<maxLogicType>([
         startNewConversation: () => {
             actions.resetContext()
             actions.focusInput()
-        },
-
-        reconnectToInProgressConversation: ({ conversation }) => {
-            const threadKey = values.threadKeys[conversation.id] || conversation.id
-
-            const logic = maxThreadLogic.findMounted({
-                conversationId: threadKey,
-                conversation: conversation,
-            })
-
-            if (logic) {
-                logic.actions.reconnectToStream()
-            }
         },
     })),
 

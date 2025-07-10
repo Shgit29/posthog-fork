@@ -22,7 +22,7 @@ from .session_summary.summarize_session_group import (
 from .session_summary.shared import SingleSessionSummaryInputs, fetch_session_data_activity
 
 from posthog.temporal.ai.conversation import (
-    ConversationWorkflow,
+    AssistantConversationRunnerWorkflow,
     process_conversation_activity,
 )
 
@@ -30,7 +30,7 @@ WORKFLOWS = [
     SyncVectorsWorkflow,
     SummarizeSingleSessionWorkflow,
     SummarizeSessionGroupWorkflow,
-    ConversationWorkflow,
+    AssistantConversationRunnerWorkflow,
 ]
 
 ACTIVITIES = [

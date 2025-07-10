@@ -1,14 +1,27 @@
-import json
+from typing import cast
 from unittest.mock import AsyncMock, patch, Mock
 from uuid import uuid4
 
-from ee.hogai.stream.conversation_stream import ConversationStreamManager, REDIS_STREAM_MAX_LENGTH
-from ee.hogai.stream.redis_stream import RedisStream, RedisStreamError
+from ee.hogai.stream.conversation_stream import ConversationStreamManager
+from ee.hogai.stream.redis_stream import (
+    RedisStream,
+    RedisStreamError,
+    RedisStreamEvent,
+    RedisStreamMessageData,
+    RedisStreamStatus,
+    RedisStreamStatusData,
+    RedisStreamConversationData,
+)
 from ee.hogai.utils.types import AssistantMode
 from ee.models.assistant import Conversation
 from posthog.constants import MAX_AI_TASK_QUEUE
-from posthog.temporal.ai.conversation import ConversationInputs, ConversationWorkflow
+from posthog.schema import AssistantEventType, AssistantMessage, HumanMessage
+from posthog.temporal.ai.conversation import (
+    AssistantConversationRunnerWorkflowInputs,
+    AssistantConversationRunnerWorkflow,
+)
 from posthog.test.base import BaseTest
+from temporalio.client import WorkflowExecutionStatus
 
 
 class TestConversationStreamManager(BaseTest):
@@ -17,117 +30,110 @@ class TestConversationStreamManager(BaseTest):
         self.conversation = Conversation.objects.create(team=self.team, user=self.user)
         self.team_id = self.team.pk
         self.user_id = self.user.pk
-        self.manager = ConversationStreamManager(self.conversation, self.team_id)
+        self.manager = ConversationStreamManager(self.conversation)
 
     def test_init(self):
         """Test ConversationStreamManager initialization."""
-        manager = ConversationStreamManager(self.conversation, self.team_id)
+        manager = ConversationStreamManager(self.conversation)
 
-        self.assertEqual(manager.conversation, self.conversation)
-        self.assertEqual(manager.team_id, self.team_id)
-        self.assertIsInstance(manager.redis_stream, RedisStream)
-        self.assertEqual(manager.redis_stream.conversation_id, self.conversation.id)
+        self.assertEqual(manager._conversation.id, self.conversation.id)
+        self.assertIsInstance(manager._redis_stream, RedisStream)
 
-    @patch("ee.hogai.stream.conversation_stream.connect")
-    @patch("ee.hogai.stream.conversation_stream.get_conversation_stream_key")
-    async def test_start_workflow_and_stream_success(self, mock_get_stream_key, mock_connect):
+    @patch("ee.hogai.stream.conversation_stream.async_connect")
+    async def test_start_workflow_and_stream_success(self, mock_connect):
         """Test successful workflow start and streaming."""
         # Setup mocks
-        mock_get_stream_key.return_value = "test_stream_key"
         mock_client = AsyncMock()
         mock_connect.return_value = mock_client
 
         # Mock the stream_conversation method
         async def mock_stream_gen():
-            for chunk in ["chunk1", "chunk2"]:
+            for chunk in [("message", {"content": "chunk1"}), ("message", {"content": "chunk2"})]:
                 yield chunk
 
-        with patch.object(self.manager, "stream_conversation") as mock_stream:
+        with (
+            patch.object(self.manager, "stream_conversation") as mock_stream,
+            patch.object(self.manager, "_wait_for_workflow_to_start") as mock_wait_for_start,
+        ):
             mock_stream.return_value = mock_stream_gen()
+            mock_wait_for_start.return_value = True
 
-            validated_data = {
-                "message": Mock(model_dump=Mock(return_value={"content": "test"})),
-                "contextual_tools": None,
-                "conversation": self.conversation.id,
-                "trace_id": uuid4(),
-            }
+            workflow_inputs = AssistantConversationRunnerWorkflowInputs(
+                team_id=self.team_id,
+                user_id=self.user_id,
+                conversation_id=self.conversation.id,
+                mode=AssistantMode.ASSISTANT,
+                trace_id=str(uuid4()),
+            )
 
             # Call the method
             results = []
-            async for chunk in self.manager.start_workflow_and_stream(self.user_id, validated_data, True):
+            async for chunk in self.manager.start_workflow_and_stream(workflow_inputs):
                 results.append(chunk)
 
             # Verify results
-            self.assertEqual(results, ["chunk1", "chunk2"])
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0], ("message", {"content": "chunk1"}))
+            self.assertEqual(results[1], ("message", {"content": "chunk2"}))
 
             # Verify client.start_workflow was called with correct parameters
             mock_client.start_workflow.assert_called_once()
             call_args = mock_client.start_workflow.call_args
 
             # Check workflow function and inputs
-            self.assertEqual(call_args[0][0], ConversationWorkflow.run)
-            workflow_inputs = call_args[0][1]
-            self.assertIsInstance(workflow_inputs, ConversationInputs)
-            self.assertEqual(workflow_inputs.team_id, self.team_id)
-            self.assertEqual(workflow_inputs.user_id, self.user_id)
-            self.assertEqual(workflow_inputs.conversation_id, self.conversation.id)
-            self.assertEqual(workflow_inputs.mode, AssistantMode.ASSISTANT)
-            self.assertEqual(workflow_inputs.is_new_conversation, True)
+            self.assertEqual(call_args[0][0], AssistantConversationRunnerWorkflow.run)
+            self.assertEqual(call_args[0][1], workflow_inputs)
 
             # Check keyword arguments
             self.assertEqual(call_args[1]["task_queue"], MAX_AI_TASK_QUEUE)
             self.assertIn("conversation-", call_args[1]["id"])
 
-    @patch("ee.hogai.stream.conversation_stream.connect")
+    @patch("ee.hogai.stream.conversation_stream.async_connect")
     async def test_start_workflow_and_stream_connection_error(self, mock_connect):
         """Test error handling when connection fails."""
         # Setup mock to raise exception
         mock_connect.side_effect = Exception("Connection failed")
 
-        # Mock redis_stream delete method
-        with patch.object(self.manager.redis_stream, "delete_stream") as mock_delete:
-            mock_delete.return_value = True
+        workflow_inputs = AssistantConversationRunnerWorkflowInputs(
+            team_id=self.team_id,
+            user_id=self.user_id,
+            conversation_id=self.conversation.id,
+            mode=AssistantMode.ASSISTANT,
+            trace_id=str(uuid4()),
+        )
 
-            validated_data = {
-                "message": Mock(model_dump=Mock(return_value={"content": "test"})),
-                "contextual_tools": None,
-                "conversation": self.conversation.id,
-                "trace_id": uuid4(),
-            }
+        # Call the method
+        results = []
+        async for chunk in self.manager.start_workflow_and_stream(workflow_inputs):
+            results.append(chunk)
 
-            # Call the method
-            results = []
-            async for chunk in self.manager.start_workflow_and_stream(self.user_id, validated_data, True):
-                results.append(chunk)
-
-            # Verify failure message is returned
-            self.assertEqual(len(results), 1)
-            self.assertIn("event: message", results[0])
-            self.assertIn("Oops! Something went wrong", results[0])
-
-            # Verify cleanup was attempted
-            mock_delete.assert_called_once_with("workflow start failure cleanup")
+        # Verify failure message is returned
+        self.assertEqual(len(results), 1)
+        event_type, message = results[0]
+        self.assertEqual(event_type, "message")
+        self.assertEqual(message.content, "Oops! Something went wrong. Please try again.")
 
     async def test_stream_conversation_success(self):
         """Test successful conversation streaming."""
         # Mock redis_stream methods
         with (
-            patch.object(self.manager.redis_stream, "wait_for_stream_creation") as mock_wait,
-            patch.object(self.manager, "_process_historical_messages") as mock_process,
-            patch.object(self.manager, "_determine_live_stream_start_id") as mock_determine_id,
-            patch.object(self.manager.redis_stream, "read_stream") as mock_read,
-            patch.object(self.manager.redis_stream, "delete_stream") as mock_delete,
+            patch.object(self.manager._redis_stream, "wait_for_stream_creation") as mock_wait,
+            patch.object(self.manager._redis_stream, "read_stream") as mock_read,
+            patch.object(self.manager._redis_stream, "delete_stream") as mock_delete,
+            patch.object(self.manager, "_redis_stream_to_assistant_output") as mock_convert,
         ):
             # Setup mocks
-            async def mock_read_stream(start_id):
-                for chunk in ["live_chunk1", "live_chunk2"]:
+            async def mock_read_stream():
+                for chunk in [Mock(), Mock()]:
                     yield chunk
 
             mock_wait.return_value = True
-            mock_process.return_value = (["historical_chunk"], [("id1", {})], False)
-            mock_determine_id.return_value = "id1"
-            mock_read.side_effect = mock_read_stream
+            mock_read.return_value = mock_read_stream()
             mock_delete.return_value = True
+            mock_convert.side_effect = [
+                ("message", {"content": "chunk1"}),
+                ("message", {"content": "chunk2"}),
+            ]
 
             # Call the method
             results = []
@@ -135,18 +141,17 @@ class TestConversationStreamManager(BaseTest):
                 results.append(chunk)
 
             # Verify results
-            self.assertEqual(results, ["historical_chunk", "live_chunk1", "live_chunk2"])
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0], ("message", {"content": "chunk1"}))
+            self.assertEqual(results[1], ("message", {"content": "chunk2"}))
 
             # Verify method calls
             mock_wait.assert_called_once()
-            mock_process.assert_called_once()
-            mock_determine_id.assert_called_once_with([("id1", {})])
-            mock_read.assert_called_once_with(start_id="id1")
-            mock_delete.assert_called_once_with("stream completed")
+            mock_delete.assert_called_once()
 
     async def test_stream_conversation_stream_not_available(self):
         """Test streaming when stream is not available."""
-        with patch.object(self.manager.redis_stream, "wait_for_stream_creation") as mock_wait:
+        with patch.object(self.manager._redis_stream, "wait_for_stream_creation") as mock_wait:
             mock_wait.return_value = False
 
             # Call the method
@@ -156,44 +161,23 @@ class TestConversationStreamManager(BaseTest):
 
             # Verify failure message is returned
             self.assertEqual(len(results), 1)
-            self.assertIn("event: message", results[0])
-            self.assertIn("Oops! Something went wrong", results[0])
-
-    async def test_stream_conversation_completed_early(self):
-        """Test streaming when conversation is completed during historical processing."""
-        with (
-            patch.object(self.manager.redis_stream, "wait_for_stream_creation") as mock_wait,
-            patch.object(self.manager, "_process_historical_messages") as mock_process,
-        ):
-            # Setup mocks
-            mock_wait.return_value = True
-            mock_process.return_value = (["historical_chunk"], [], True)  # completed=True
-
-            # Call the method
-            results = []
-            async for chunk in self.manager.stream_conversation():
-                results.append(chunk)
-
-            # Verify only historical chunks are returned
-            self.assertEqual(results, ["historical_chunk"])
+            event_type, message = results[0]
+            self.assertEqual(event_type, "message")
+            self.assertEqual(message.content, "Oops! Something went wrong. Please try again.")
 
     async def test_stream_conversation_redis_error(self):
         """Test streaming with Redis error."""
         with (
-            patch.object(self.manager.redis_stream, "wait_for_stream_creation") as mock_wait,
-            patch.object(self.manager, "_process_historical_messages") as mock_process,
-            patch.object(self.manager, "_determine_live_stream_start_id") as mock_determine_id,
-            patch.object(self.manager.redis_stream, "read_stream") as mock_read,
-            patch.object(self.manager.redis_stream, "delete_stream") as mock_delete,
+            patch.object(self.manager._redis_stream, "wait_for_stream_creation") as mock_wait,
+            patch.object(self.manager._redis_stream, "read_stream") as mock_read,
+            patch.object(self.manager._redis_stream, "delete_stream") as mock_delete,
         ):
             # Setup mocks
-            async def mock_read_stream_error(start_id):
+            async def mock_read_stream_error():
                 raise RedisStreamError("Redis error")
 
             mock_wait.return_value = True
-            mock_process.return_value = (["historical_chunk"], [("id1", {})], False)
-            mock_determine_id.return_value = "id1"
-            mock_read.side_effect = mock_read_stream_error
+            mock_read.return_value = mock_read_stream_error()
             mock_delete.return_value = True
 
             # Call the method
@@ -201,20 +185,17 @@ class TestConversationStreamManager(BaseTest):
             async for chunk in self.manager.stream_conversation():
                 results.append(chunk)
 
-            # Verify historical chunk and failure message
-            self.assertEqual(len(results), 2)
-            self.assertEqual(results[0], "historical_chunk")
-            self.assertIn("event: message", results[1])
-            self.assertIn("Oops! Something went wrong", results[1])
-
-            # Verify cleanup was called
-            mock_delete.assert_called_once_with("error cleanup")
+            # Verify failure message
+            self.assertEqual(len(results), 1)
+            event_type, message = results[0]
+            self.assertEqual(event_type, "message")
+            self.assertEqual(message.content, "Oops! Something went wrong. Please try again.")
 
     async def test_stream_conversation_general_error(self):
         """Test streaming with general exception."""
         with (
-            patch.object(self.manager.redis_stream, "wait_for_stream_creation") as mock_wait,
-            patch.object(self.manager.redis_stream, "delete_stream") as mock_delete,
+            patch.object(self.manager._redis_stream, "wait_for_stream_creation") as mock_wait,
+            patch.object(self.manager._redis_stream, "delete_stream") as mock_delete,
         ):
             # Setup mocks
             mock_wait.side_effect = Exception("General error")
@@ -227,157 +208,236 @@ class TestConversationStreamManager(BaseTest):
 
             # Verify failure message
             self.assertEqual(len(results), 1)
-            self.assertIn("event: message", results[0])
-            self.assertIn("Oops! Something went wrong", results[0])
+            event_type, message = results[0]
+            self.assertEqual(event_type, "message")
+            self.assertEqual(message.content, "Oops! Something went wrong. Please try again.")
 
-            # Verify cleanup was called
-            mock_delete.assert_called_once_with("error cleanup")
-
-    def test_determine_live_stream_start_id_no_history(self):
-        """Test determining start ID when no historical messages exist."""
-        result = self.manager._determine_live_stream_start_id(None)
-        self.assertEqual(result, "0")
-
-        result = self.manager._determine_live_stream_start_id([])
-        self.assertEqual(result, "0")
-
-    def test_determine_live_stream_start_id_with_history(self):
-        """Test determining start ID with historical messages."""
-        historical_messages = [
-            ("1234567890-1", {}),
-            ("1234567890-0", {}),
-            ("1234567891-0", {}),
-        ]
-
-        result = self.manager._determine_live_stream_start_id(historical_messages)
-        self.assertEqual(result, "1234567891-0")  # Should return the highest ID
-
-    async def test_process_historical_messages_success(self):
-        """Test processing historical messages successfully."""
-        # Mock historical messages
-        historical_messages = [
-            ("id1", {b"data": b"chunk1"}),
-            ("id2", {b"data": b"chunk2"}),
-            ("id3", {b"status": b"complete"}),
-        ]
-
-        with (
-            patch.object(self.manager.redis_stream, "get_stream_history") as mock_get_history,
-            patch.object(self.manager.redis_stream, "safe_decode") as mock_decode,
-            patch.object(self.manager.redis_stream, "delete_stream") as mock_delete,
-        ):
-            # Setup mocks
-            mock_get_history.return_value = historical_messages
-            mock_decode.side_effect = lambda data, field: data.decode() if isinstance(data, bytes) else data
-            mock_delete.return_value = True
-
-            # Call the method
-            message_chunks, historical_msgs, completed = await self.manager._process_historical_messages()
-
-            # Verify results
-            self.assertEqual(message_chunks, ["chunk1", "chunk2"])
-            self.assertEqual(historical_msgs, historical_messages)
-            self.assertTrue(completed)
-
-            # Verify calls
-            mock_get_history.assert_called_once_with(count=REDIS_STREAM_MAX_LENGTH)
-            mock_delete.assert_called_once_with("conversation completed")
-
-    async def test_process_historical_messages_with_error(self):
-        """Test processing historical messages with error status."""
-        historical_messages = [
-            ("id1", {b"data": b"chunk1"}),
-            ("id2", {b"status": b"error", b"error": b"Test error"}),
-        ]
-
-        with (
-            patch.object(self.manager.redis_stream, "get_stream_history") as mock_get_history,
-            patch.object(self.manager.redis_stream, "safe_decode") as mock_decode,
-            patch.object(self.manager.redis_stream, "delete_stream") as mock_delete,
-        ):
-            # Setup mocks
-            mock_get_history.return_value = historical_messages
-            mock_decode.side_effect = lambda data, field: data.decode() if isinstance(data, bytes) else data
-            mock_delete.return_value = True
-
-            # Call the method
-            message_chunks, historical_msgs, completed = await self.manager._process_historical_messages()
-
-            # Verify results
-            self.assertEqual(len(message_chunks), 2)
-            self.assertEqual(message_chunks[0], "chunk1")
-            self.assertIn("event: message", message_chunks[1])  # Failure message
-            self.assertTrue(completed)
-
-            # Verify cleanup was called
-            mock_delete.assert_called_once_with("conversation failed")
-
-    async def test_process_historical_messages_skips_empty_data(self):
-        """Test that empty or None data is skipped."""
-        historical_messages = [
-            ("id1", {b"data": b"valid_chunk"}),
-            ("id2", {b"data": b""}),  # Empty data
-            ("id3", {b"other": b"not_data"}),  # No data field
-        ]
-
-        with (
-            patch.object(self.manager.redis_stream, "get_stream_history") as mock_get_history,
-            patch.object(self.manager.redis_stream, "safe_decode") as mock_decode,
-        ):
-            # Setup mocks
-            mock_get_history.return_value = historical_messages
-            mock_decode.side_effect = lambda data, field: data.decode() if isinstance(data, bytes) and data else None
-
-            # Call the method
-            message_chunks, historical_msgs, completed = await self.manager._process_historical_messages()
-
-            # Verify only valid chunk is included
-            self.assertEqual(message_chunks, ["valid_chunk"])
-            self.assertFalse(completed)
-
-    def test_yield_failure_message(self):
+    def test_failure_message(self):
         """Test failure message generation."""
-        result = self.manager._yield_failure_message()
+        event_type, message = self.manager._failure_message()
 
-        # Verify SSE format
-        self.assertIn("event: message", result)
-        self.assertIn("data: ", result)
-        self.assertIn("Oops! Something went wrong", result)
-        self.assertTrue(result.endswith("\n\n"))
+        # Verify message format
+        self.assertEqual(event_type, AssistantEventType.MESSAGE)
+        self.assertEqual(cast(AssistantMessage, message).content, "Oops! Something went wrong. Please try again.")
+        self.assertIsNotNone(message.id)
 
-        # Verify it's valid JSON in the data field
-        data_line = next(line for line in result.split("\n") if line.startswith("data: "))
-        json_data = data_line.replace("data: ", "")
-        parsed = json.loads(json_data)
+    async def test_redis_stream_to_assistant_output_message(self):
+        message_data = RedisStreamMessageData(
+            type=AssistantEventType.MESSAGE, payload=HumanMessage(content="test message")
+        )
+        event = RedisStreamEvent(event=message_data, timestamp="1234567890")
 
-        self.assertEqual(parsed["content"], "Oops! Something went wrong. Please try again.")
-        self.assertIn("id", parsed)
+        result = await self.manager._redis_stream_to_assistant_output(event)
 
-    async def test_stream_conversation_filters_empty_chunks(self):
-        """Test that empty message chunks are filtered out."""
-        # Mock the original method to test filtering
+        self.assertEqual(result[0], AssistantEventType.MESSAGE)
+        self.assertEqual(result[1].content, "test message")
+
+    async def test_redis_stream_to_assistant_output_conversation(self):
+        """Test conversion of conversation data."""
+        conversation_data = RedisStreamConversationData(type="conversation", payload=self.conversation.id)
+        event = RedisStreamEvent(event=conversation_data, timestamp="1234567890")
+
+        result = await self.manager._redis_stream_to_assistant_output(event)
+
+        self.assertEqual(result[0], AssistantEventType.CONVERSATION)
+        self.assertEqual(result[1].id, self.conversation.id)
+
+    async def test_redis_stream_to_assistant_output_conversation_not_found(self):
+        """Test conversion when conversation doesn't exist."""
+        with self.assertRaises(Conversation.DoesNotExist):
+            fake_uuid = uuid4()
+            conversation_data = RedisStreamConversationData(type="conversation", payload=fake_uuid)
+            event = RedisStreamEvent(event=conversation_data, timestamp="1234567890")
+
+            await self.manager._redis_stream_to_assistant_output(event)
+
+    async def test_redis_stream_to_assistant_output_unknown_event(self):
+        """Test conversion with unknown event type."""
+        status_data = RedisStreamStatusData(type="status", payload=RedisStreamStatus(status="complete"))
+        event = RedisStreamEvent(event=status_data, timestamp="1234567890")
+
+        result = await self.manager._redis_stream_to_assistant_output(event)
+
+        self.assertIsNone(result)
+
+    async def test_cancel_conversation_success(self):
+        """Test successful conversation cancellation."""
+        # Mock all external dependencies
         with (
-            patch.object(self.manager.redis_stream, "wait_for_stream_creation") as mock_wait,
-            patch.object(self.manager, "_process_historical_messages") as mock_process,
-            patch.object(self.manager, "_determine_live_stream_start_id") as mock_determine_id,
-            patch.object(self.manager.redis_stream, "read_stream") as mock_read,
-            patch.object(self.manager.redis_stream, "delete_stream") as mock_delete,
+            patch("ee.hogai.stream.conversation_stream.async_connect") as mock_connect,
+            patch.object(self.manager._redis_stream, "delete_stream") as mock_delete,
+            patch.object(self.conversation, "asave") as mock_save,
         ):
-            # Setup mocks with empty chunks
-            async def mock_read_stream_empty(start_id):
-                return
-                yield  # This is unreachable but keeps the function as a generator
+            # Setup client and handle mocks
+            mock_client = Mock()
+            mock_handle = Mock()
+            mock_connect.return_value = mock_client
+            mock_client.get_workflow_handle.return_value = mock_handle
 
-            mock_wait.return_value = True
-            mock_process.return_value = (["", "valid_chunk", None, "another_chunk"], [], False)
-            mock_determine_id.return_value = "0"
-            mock_read.side_effect = mock_read_stream_empty
+            # Create a simple async function for cancel
+            async def cancel_mock():
+                pass
+
+            mock_handle.cancel = cancel_mock
             mock_delete.return_value = True
 
             # Call the method
-            results = []
-            async for chunk in self.manager.stream_conversation():
-                results.append(chunk)
+            result = await self.manager.cancel_conversation()
 
-            # Verify only non-empty chunks are returned
-            self.assertEqual(results, ["valid_chunk", "another_chunk"])
+            # Verify success
+            self.assertTrue(result)
+
+            # Verify workflow cancellation
+            mock_client.get_workflow_handle.assert_called_once_with(workflow_id=f"conversation-{self.conversation.id}")
+
+            # Verify Redis stream cleanup
+            mock_delete.assert_called_once()
+
+            # Verify conversation status update
+            self.assertEqual(self.conversation.status, Conversation.Status.IDLE)
+            mock_save.assert_called_once_with(update_fields=["status", "updated_at"])
+
+    @patch("ee.hogai.stream.conversation_stream.async_connect")
+    async def test_cancel_conversation_temporal_error(self, mock_connect):
+        """Test conversation cancellation when Temporal client fails."""
+        # Setup mock to raise exception
+        mock_connect.side_effect = Exception("Temporal connection failed")
+
+        # Call the method
+        result = await self.manager.cancel_conversation()
+
+        # Verify failure
+        self.assertFalse(result)
+
+    async def test_cancel_conversation_workflow_cancel_error(self):
+        """Test conversation cancellation when workflow cancel fails."""
+        with patch("ee.hogai.stream.conversation_stream.async_connect") as mock_connect:
+            # Setup mocks
+            mock_client = Mock()
+            mock_handle = Mock()
+            mock_connect.return_value = mock_client
+            mock_client.get_workflow_handle.return_value = mock_handle
+
+            # Create an async function that raises exception
+            async def cancel_error():
+                raise Exception("Workflow cancel failed")
+
+            mock_handle.cancel = cancel_error
+
+            # Call the method
+            result = await self.manager.cancel_conversation()
+
+            # Verify failure
+            self.assertFalse(result)
+
+    async def test_cancel_conversation_redis_cleanup_error(self):
+        """Test conversation cancellation when Redis cleanup fails."""
+        with (
+            patch("ee.hogai.stream.conversation_stream.async_connect") as mock_connect,
+            patch.object(self.manager._redis_stream, "delete_stream") as mock_delete,
+        ):
+            # Setup mocks
+            mock_client = Mock()
+            mock_handle = Mock()
+            mock_connect.return_value = mock_client
+            mock_client.get_workflow_handle.return_value = mock_handle
+
+            async def cancel_mock():
+                pass
+
+            mock_handle.cancel = cancel_mock
+            mock_delete.side_effect = Exception("Redis cleanup failed")
+
+            # Call the method
+            result = await self.manager.cancel_conversation()
+
+            # Verify failure
+            self.assertFalse(result)
+
+    async def test_cancel_conversation_save_error(self):
+        """Test conversation cancellation when conversation save fails."""
+        # Mock Redis stream operations and conversation save
+        with (
+            patch.object(self.manager._redis_stream, "delete_stream") as mock_delete,
+            patch.object(self.conversation, "asave") as mock_save,
+            patch("ee.hogai.stream.conversation_stream.async_connect") as mock_connect,
+        ):
+            mock_delete.return_value = True
+            mock_save.side_effect = Exception("Save failed")
+            mock_client = Mock()
+            mock_handle = Mock()
+            mock_connect.return_value = mock_client
+            mock_client.get_workflow_handle.return_value = mock_handle
+
+            async def cancel_mock():
+                pass
+
+            mock_handle.cancel = cancel_mock
+
+            # Call the method
+            result = await self.manager.cancel_conversation()
+
+            # Verify failure
+            self.assertFalse(result)
+
+            # Verify Redis cleanup was attempted
+            mock_delete.assert_called_once()
+
+    async def test_wait_for_workflow_to_start_success(self):
+        """Test successful workflow start waiting."""
+        mock_handle = Mock()
+        mock_description = Mock()
+        mock_description.status = WorkflowExecutionStatus.RUNNING
+        mock_handle.describe = AsyncMock(return_value=mock_description)
+
+        # Should return immediately when workflow is running
+        result = await self.manager._wait_for_workflow_to_start(mock_handle)
+        self.assertTrue(result)
+
+        # Verify describe was called at least once
+        mock_handle.describe.assert_called()
+
+    async def test_wait_for_workflow_to_start_eventually_running(self):
+        """Test workflow that starts running after a few attempts."""
+        mock_handle = Mock()
+        mock_description_not_running = Mock()
+        mock_description_not_running.status = None
+        mock_description_running = Mock()
+        mock_description_running.status = WorkflowExecutionStatus.RUNNING
+
+        # First call returns CREATED, second call returns RUNNING
+        mock_handle.describe = AsyncMock(side_effect=[mock_description_not_running, mock_description_running])
+
+        # Should succeed after waiting
+        result = await self.manager._wait_for_workflow_to_start(mock_handle)
+        self.assertTrue(result)
+
+        # Verify describe was called twice
+        self.assertEqual(mock_handle.describe.call_count, 2)
+
+    async def test_wait_for_workflow_to_start_failed_immediately(self):
+        """Test workflow that ends unexpectedly in FAILED state."""
+        mock_handle = Mock()
+        mock_description = Mock()
+        mock_description.status = WorkflowExecutionStatus.FAILED
+        mock_handle.describe = AsyncMock(return_value=mock_description)
+
+        # Should return False for unexpected failure
+        result = await self.manager._wait_for_workflow_to_start(mock_handle)
+        self.assertFalse(result)
+
+    async def test_wait_for_workflow_to_start_timeout(self):
+        """Test workflow start timeout."""
+        mock_handle = Mock()
+        mock_description = Mock()
+        mock_description.status = None
+        mock_handle.describe = AsyncMock(return_value=mock_description)
+
+        # Patch sleep to speed up test
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            # Should return False for timeout
+            result = await self.manager._wait_for_workflow_to_start(mock_handle)
+            self.assertFalse(result)
+
+            # Verify sleep was called (indicating retry attempts)
+            mock_sleep.assert_called()

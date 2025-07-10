@@ -1,7 +1,7 @@
 import pydantic
 import structlog
 from django.conf import settings
-from django.http import StreamingHttpResponse
+from django.http import Http404, StreamingHttpResponse
 from rest_framework import serializers, status
 from rest_framework.decorators import action
 from rest_framework.mixins import ListModelMixin, RetrieveModelMixin
@@ -13,11 +13,16 @@ from typing import cast
 from ee.hogai.api.serializers import ConversationSerializer
 from ee.hogai.stream.conversation_stream import ConversationStreamManager
 from ee.hogai.graph.graph import AssistantGraph
+from ee.hogai.utils.aio import async_to_sync
+from asgiref.sync import async_to_sync as asgi_async_to_sync
+from ee.hogai.utils.sse import AssistantSSESerializer
+from ee.hogai.utils.types import AssistantMode
 from ee.models.assistant import Conversation
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.models.user import User
 from posthog.rate_limit import AIBurstRateThrottle, AISustainedRateThrottle
 from posthog.schema import HumanMessage
+from posthog.temporal.ai.conversation import AssistantConversationRunnerWorkflowInputs
 from posthog.utils import get_instance_region
 
 logger = structlog.get_logger(__name__)
@@ -101,45 +106,76 @@ class ConversationViewSet(TeamAndOrgViewSetMixin, ListModelMixin, RetrieveModelM
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        conversation_id = serializer.validated_data.get("conversation")
+        conversation_id = serializer.validated_data["conversation"]
 
         has_message = serializer.validated_data.get("content") is not None
 
         is_new_conversation = False
+        self.kwargs[self.lookup_url_kwarg] = conversation_id
         try:
-            self.kwargs[self.lookup_url_kwarg] = conversation_id
             conversation = self.get_object()
-        except Exception:
+        except Http404:
             # Conversation doesn't exist, create it if we have a message
             if not has_message:
                 return Response(
                     {"error": "Cannot stream from non-existent conversation"}, status=status.HTTP_400_BAD_REQUEST
                 )
             # Use frontend-provided conversation ID
-            create_kwargs = {"user": request.user, "team": self.team, "id": conversation_id}
-            conversation = self.get_queryset().create(**create_kwargs)
+            conversation = Conversation.objects.create(
+                user=cast(User, request.user), team=self.team, id=conversation_id
+            )
             is_new_conversation = True
 
         is_idle = conversation.status == Conversation.Status.IDLE
 
-        stream_manager = ConversationStreamManager(conversation, self.team.id)
+        def get_stream_response(stream_func):
+            async def async_stream():
+                serializer = AssistantSSESerializer()
+                stream_manager = ConversationStreamManager(conversation)
+                async for chunk in stream_func(stream_manager):
+                    yield serializer.dumps(chunk).encode("utf-8")
+
+            if settings.SERVER_GATEWAY_INTERFACE == "ASGI":
+                return async_stream()
+            return async_to_sync(async_stream)
 
         # If this is a streaming request
         if not has_message and not is_idle:
-            return StreamingHttpResponse(stream_manager.stream_conversation(), content_type="text/event-stream")
+            return StreamingHttpResponse(
+                get_stream_response(lambda sm: sm.stream_conversation()), content_type="text/event-stream"
+            )
+
+        workflow_inputs = AssistantConversationRunnerWorkflowInputs(
+            team_id=self.team_id,
+            user_id=cast(User, request.user).id,
+            conversation_id=conversation.id,
+            message=serializer.validated_data["message"].model_dump() if serializer.validated_data["message"] else None,
+            contextual_tools=serializer.validated_data.get("contextual_tools"),
+            is_new_conversation=is_new_conversation,
+            trace_id=str(serializer.validated_data["trace_id"]),
+            mode=AssistantMode.ASSISTANT,
+        )
 
         # Otherwise, process the new message (new generation) or resume generation
         return StreamingHttpResponse(
-            stream_manager.start_workflow_and_stream(
-                cast(User, request.user).id, serializer.validated_data, is_new_conversation
-            ),
+            get_stream_response(lambda sm: sm.start_workflow_and_stream(workflow_inputs)),
             content_type="text/event-stream",
         )
 
     @action(detail=True, methods=["PATCH"])
     def cancel(self, request: Request, *args, **kwargs):
         conversation = self.get_object()
-        if conversation.status != Conversation.Status.CANCELING:
-            conversation.status = Conversation.Status.CANCELING
-            conversation.save()
+
+        if conversation.status in [Conversation.Status.CANCELING, Conversation.Status.IDLE]:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        conversation.status = Conversation.Status.CANCELING
+        conversation.save()
+
+        async def cancel_workflow():
+            conversation_manager = ConversationStreamManager(conversation)
+            await conversation_manager.cancel_conversation()
+
+        asgi_async_to_sync(cancel_workflow)()
+
         return Response(status=status.HTTP_204_NO_CONTENT)
