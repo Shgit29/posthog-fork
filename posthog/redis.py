@@ -1,8 +1,8 @@
 # flake8: noqa
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TypeVar, Union, overload
 
 import redis
-import redis.asyncio as aioredis
+from redis import asyncio as aioredis
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
