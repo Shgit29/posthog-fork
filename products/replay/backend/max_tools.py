@@ -46,7 +46,7 @@ class SearchSessionRecordingsTool(MaxTool):
 
         result = await graph.ainvoke(graph_input)
 
-        if "generated_filter_options" not in result:
+        if "generated_filter_options" not in result or result["generated_filter_options"] is None:
             last_message = result["messages"][-1]
             help_content = "I need more information to proceed."
 
@@ -59,10 +59,6 @@ class SearchSessionRecordingsTool(MaxTool):
             current_filters = MaxRecordingUniversalFilters.model_validate(self.context.get("current_filters", {}))
 
             return help_content, current_filters
-
-        # Convert to the expected type
-        if "generated_filter_options" not in result:
-            raise ValueError("No filter options were generated.")
 
         try:
             result = MaxRecordingUniversalFilters.model_validate(result["generated_filter_options"]["data"])
