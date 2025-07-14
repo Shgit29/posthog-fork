@@ -327,6 +327,7 @@ class Assistant:
                 | AssistantNodeName.RETENTION_PLANNER_TOOLS
                 | AssistantNodeName.SQL_PLANNER
                 | AssistantNodeName.SQL_PLANNER_TOOLS
+                | AssistantNodeName.FILTER_OPTIONS_TOOLS
             ):
                 substeps: list[str] = []
                 if input:
