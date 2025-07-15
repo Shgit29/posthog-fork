@@ -118,7 +118,6 @@ export enum NodeKind {
     WebAnalyticsExternalSummaryQuery = 'WebAnalyticsExternalSummaryQuery',
 
     // Revenue analytics queries
-    RevenueAnalyticsArpuQuery = 'RevenueAnalyticsArpuQuery',
     RevenueAnalyticsCustomerCountQuery = 'RevenueAnalyticsCustomerCountQuery',
     RevenueAnalyticsGrowthRateQuery = 'RevenueAnalyticsGrowthRateQuery',
     RevenueAnalyticsOverviewQuery = 'RevenueAnalyticsOverviewQuery',
@@ -163,7 +162,6 @@ export type AnyDataNode =
     | HogQLQuery
     | HogQLMetadata
     | HogQLAutocomplete
-    | RevenueAnalyticsArpuQuery
     | RevenueAnalyticsCustomerCountQuery
     | RevenueAnalyticsGrowthRateQuery
     | RevenueAnalyticsOverviewQuery
@@ -230,7 +228,6 @@ export type QuerySchema =
     | WebAnalyticsExternalSummaryQuery
 
     // Revenue analytics
-    | RevenueAnalyticsArpuQuery
     | RevenueAnalyticsCustomerCountQuery
     | RevenueAnalyticsGrowthRateQuery
     | RevenueAnalyticsOverviewQuery
@@ -758,7 +755,6 @@ export interface DataTableNode
                     | WebVitalsQuery
                     | WebVitalsPathBreakdownQuery
                     | SessionAttributionExplorerQuery
-                    | RevenueAnalyticsArpuQuery
                     | RevenueAnalyticsCustomerCountQuery
                     | RevenueAnalyticsGrowthRateQuery
                     | RevenueAnalyticsOverviewQuery
@@ -791,7 +787,6 @@ export interface DataTableNode
         | WebVitalsQuery
         | WebVitalsPathBreakdownQuery
         | SessionAttributionExplorerQuery
-        | RevenueAnalyticsArpuQuery
         | RevenueAnalyticsCustomerCountQuery
         | RevenueAnalyticsGrowthRateQuery
         | RevenueAnalyticsOverviewQuery
@@ -1952,17 +1947,6 @@ export enum RevenueAnalyticsGroupBy {
     INITIAL_COUPON_ID = 'initial_coupon_id',
     PRODUCT = 'product',
 }
-
-export interface RevenueAnalyticsArpuQuery extends RevenueAnalyticsBaseQuery<RevenueAnalyticsArpuQueryResponse> {
-    kind: NodeKind.RevenueAnalyticsArpuQuery
-    groupBy: RevenueAnalyticsGroupBy[]
-    interval: IntervalType
-}
-
-export interface RevenueAnalyticsArpuQueryResponse extends AnalyticsQueryResponseBase<unknown> {
-    columns?: string[]
-}
-export type CachedRevenueAnalyticsArpuQueryResponse = CachedQueryResponse<RevenueAnalyticsArpuQueryResponse>
 
 export interface RevenueAnalyticsRevenueQuery extends RevenueAnalyticsBaseQuery<RevenueAnalyticsRevenueQueryResponse> {
     kind: NodeKind.RevenueAnalyticsRevenueQuery
