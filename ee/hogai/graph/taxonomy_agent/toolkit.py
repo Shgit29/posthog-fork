@@ -40,6 +40,7 @@ class RetrieveEntityPropertiesValuesTool(BaseModel):
     Retrieves possible values for a specific property of a given entity type.
     Use when you know both the entity type and property name but need to see available values.
     Returns a list of actual property values found in the data or a message that values have not been found.
+    If the value of the user is not in the list, you can use that value directly.
     """
 
     model_config = ConfigDict(title="retrieve_entity_property_values")
