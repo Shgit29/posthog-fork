@@ -47,6 +47,7 @@ APIScopeObject = Literal[
     "webhook",
     "warehouse_view",
     "warehouse_table",
+    "max_conversation",
     "logs",  # logs product
 ]
 
