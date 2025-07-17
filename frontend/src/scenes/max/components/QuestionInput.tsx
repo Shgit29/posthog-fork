@@ -3,7 +3,7 @@ import { IconArrowRight, IconStopFilled, IconWrench } from '@posthog/icons'
 import { LemonButton, LemonTextArea, Tooltip } from '@posthog/lemon-ui'
 import clsx from 'clsx'
 import { useActions, useValues } from 'kea'
-import { ReactNode } from 'react'
+import { ReactNode, useState, useMemo, useRef } from 'react'
 import React from 'react'
 import { AIConsentPopoverWrapper } from 'scenes/settings/organization/AIConsentPopoverWrapper'
 
@@ -13,6 +13,7 @@ import { maxGlobalLogic } from '../maxGlobalLogic'
 import { maxLogic } from '../maxLogic'
 import { maxThreadLogic } from '../maxThreadLogic'
 import { ContextDisplay } from '../Context'
+import { CommandAutocomplete, AVAILABLE_MAX_COMMANDS, Command, CommandAutocompleteHandle } from './CommandAutocomplete'
 
 interface QuestionInputProps {
     isFloating?: boolean
@@ -49,6 +50,38 @@ export const QuestionInput = React.forwardRef<HTMLDivElement, QuestionInputProps
     const { setQuestion } = useActions(maxLogic)
     const { threadLoading, inputDisabled, submissionDisabledReason } = useValues(maxThreadLogic)
     const { askMax, stopGeneration, completeThreadGeneration } = useActions(maxThreadLogic)
+
+    // Command autocomplete state
+    const [showCommandAutocomplete, setShowCommandAutocomplete] = useState(false)
+    const [focusedCommandIndex, setFocusedCommandIndex] = useState(0)
+    const commandAutocompleteRef = useRef<CommandAutocompleteHandle>(null)
+
+    // Filter commands based on current input
+    const filteredCommands = useMemo(() => {
+        if (!question.startsWith('/')) {
+            return []
+        }
+
+        return AVAILABLE_MAX_COMMANDS.filter((command) => command.name.toLowerCase().includes(question.toLowerCase()))
+    }, [question])
+
+    // Handle command selection
+    const handleCommandSelect = (command: Command): void => {
+        setShowCommandAutocomplete(false)
+        setFocusedCommandIndex(0)
+        // Execute the command immediately
+        askMax(command.name)
+    }
+
+    // Handle input changes to show/hide command autocomplete
+    const handleQuestionChange = (value: string): void => {
+        setQuestion(value)
+        const shouldShow = value.startsWith('/') && value.length > 0
+        setShowCommandAutocomplete(shouldShow)
+        if (shouldShow) {
+            setFocusedCommandIndex(0) // Reset focus when showing
+        }
+    }
 
     return (
         <div
@@ -95,20 +128,58 @@ export const QuestionInput = React.forwardRef<HTMLDivElement, QuestionInputProps
                         <LemonTextArea
                             ref={textAreaRef}
                             value={question}
-                            onChange={(value) => setQuestion(value)}
+                            onChange={handleQuestionChange}
                             placeholder={
-                                threadLoading ? 'Thinking…' : isFloating ? placeholder || 'Ask follow-up' : 'Ask away'
+                                threadLoading
+                                    ? 'Thinking…'
+                                    : isFloating
+                                    ? placeholder || 'Ask follow-up (/ for commands)'
+                                    : 'Ask away (/ for commands)'
                             }
                             onPressEnter={() => {
-                                if (question && !submissionDisabledReason && !threadLoading) {
+                                // Don't handle Enter here if commands are showing - let the keyboard handler do it
+                                if (
+                                    !showCommandAutocomplete &&
+                                    question &&
+                                    !submissionDisabledReason &&
+                                    !threadLoading
+                                ) {
                                     onSubmit?.()
                                     askMax(question)
+                                }
+                            }}
+                            onKeyDown={(e) => {
+                                // Let command autocomplete handle keyboard events first
+                                if (showCommandAutocomplete && commandAutocompleteRef.current) {
+                                    const handled = commandAutocompleteRef.current.handleKeyDown(e)
+                                    if (handled) {
+                                        if (e.key === 'Escape') {
+                                            setShowCommandAutocomplete(false)
+                                            setFocusedCommandIndex(0)
+                                        }
+                                        return
+                                    }
+                                }
+
+                                // Handle regular keyboard events
+                                if (e.key === 'Escape' && showCommandAutocomplete) {
+                                    setShowCommandAutocomplete(false)
+                                    setFocusedCommandIndex(0)
+                                    e.preventDefault()
                                 }
                             }}
                             disabled={inputDisabled}
                             minRows={1}
                             maxRows={10}
                             className="!border-none !bg-transparent min-h-0 py-2.5 pl-2.5 pr-12"
+                        />
+                        <CommandAutocomplete
+                            ref={commandAutocompleteRef}
+                            commands={filteredCommands}
+                            onSelect={handleCommandSelect}
+                            visible={showCommandAutocomplete}
+                            focusedIndex={focusedCommandIndex}
+                            onFocusedIndexChange={setFocusedCommandIndex}
                         />
                     </div>
                     <div

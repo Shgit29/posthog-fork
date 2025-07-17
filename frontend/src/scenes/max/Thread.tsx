@@ -1,4 +1,5 @@
 import {
+    IconBolt,
     IconCheck,
     IconCollapse,
     IconExpand,
@@ -184,10 +185,19 @@ function MessageGroup({ messages, isFinal: isFinalGroup }: MessageGroupProps): J
                                         useCurrentPageContext={false}
                                     />
                                 )}
-                                <MarkdownMessage
-                                    content={message.content || '*No text.*'}
-                                    id={message.id || 'no-text'}
-                                />
+                                {message.content?.startsWith('/') ? (
+                                    <div className="flex items-center">
+                                        <Tooltip title="This is a Max command">
+                                            <IconBolt className="text-base mr-1.5" />
+                                        </Tooltip>
+                                        <span className="font-mono">{message.content}</span>
+                                    </div>
+                                ) : (
+                                    <MarkdownMessage
+                                        content={message.content || '*No text.*'}
+                                        id={message.id || 'no-text'}
+                                    />
+                                )}
                             </MessageTemplate>
                         )
                     } else if (
