@@ -2,7 +2,7 @@ import { IconSparkles } from '@posthog/icons'
 import { Tooltip } from '@posthog/lemon-ui'
 import { useActions, useValues } from 'kea'
 import { HedgehogActor, HedgehogBuddy } from 'lib/components/HedgehogBuddy/HedgehogBuddy'
-import { useEffect, useRef } from 'react'
+import React, { useEffect, useRef } from 'react'
 import { userLogic } from 'scenes/userLogic'
 
 import { maxGlobalLogic } from '../maxGlobalLogic'
@@ -13,19 +13,21 @@ import { useDragAndSnap } from '../utils/useDragAndSnap'
 const DEFAULT_WAVE_INTERVAL = 5000 // milliseconds
 
 interface HedgehogAvatarProps {
-    onExpand: () => void
+    onExpand?: () => void
     waveInterval?: number
-    isExpanded: boolean
+    isExpanded?: boolean
     fixedDirection?: 'left' | 'right'
     onPositionChange?: (position: PositionWithSide) => void
+    phoning?: boolean
 }
 
-export function HedgehogAvatar({
+export const HedgehogAvatar = React.memo(function HedgehogAvatar({
     onExpand,
     waveInterval = DEFAULT_WAVE_INTERVAL,
     isExpanded,
     fixedDirection,
     onPositionChange,
+    phoning = false,
 }: HedgehogAvatarProps): JSX.Element {
     const { user } = useValues(userLogic)
     const hedgehogActorRef = useRef<HedgehogActor | null>(null)
@@ -44,11 +46,11 @@ export function HedgehogAvatar({
         setFloatingMaxDragState({ isDragging, isAnimating })
     }, [isDragging, isAnimating, setFloatingMaxDragState])
 
-    // Trigger wave animation periodically when collapsed
+    // Trigger wave animation periodically when collapsed OR continuous phone animation
     useEffect(() => {
         let interval: ReturnType<typeof setInterval> | null = null
 
-        if (!isExpanded && hedgehogActorRef.current) {
+        if (!isExpanded && hedgehogActorRef.current && !phoning) {
             interval = setInterval(() => {
                 hedgehogActorRef.current?.setAnimation('wave')
             }, waveInterval)
@@ -59,7 +61,7 @@ export function HedgehogAvatar({
                 clearInterval(interval)
             }
         }
-    }, [isExpanded, waveInterval])
+    }, [isExpanded, waveInterval, phoning])
 
     return (
         <div
@@ -76,7 +78,7 @@ export function HedgehogAvatar({
                 }`}
                 onClick={() => {
                     if (!hasDragged && !isAnimating) {
-                        onExpand()
+                        onExpand?.()
                     }
                 }}
                 onMouseDown={handleMouseDown}
@@ -118,8 +120,15 @@ export function HedgehogAvatar({
                             }}
                             onActorLoaded={(actor) => {
                                 hedgehogActorRef.current = actor
-                                // Start with a wave
-                                actor.setAnimation('wave')
+
+                                // Start with appropriate animation
+                                setTimeout(() => {
+                                    if (phoning) {
+                                        actor.setAnimation('phone')
+                                    } else {
+                                        actor.setAnimation('wave')
+                                    }
+                                }, 100)
                             }}
                         />
                     </div>
@@ -127,4 +136,4 @@ export function HedgehogAvatar({
             </div>
         </div>
     )
-}
+})

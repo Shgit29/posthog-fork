@@ -48,6 +48,7 @@ import { isHogQLQuery } from '~/queries/utils'
 import { ProductKey } from '~/types'
 
 import { ContextSummary } from './Context'
+import { HedgehogAvatar } from './components/HedgehogAvatar'
 import { MarkdownMessage } from './MarkdownMessage'
 import { maxGlobalLogic } from './maxGlobalLogic'
 import { maxLogic, MessageStatus, ThreadMessage } from './maxLogic'
@@ -142,6 +143,7 @@ interface MessageGroupProps {
 function MessageGroup({ messages, isFinal: isFinalGroup }: MessageGroupProps): JSX.Element {
     const { user } = useValues(userLogic)
     const { tools } = useValues(maxGlobalLogic)
+    const { streamingActive } = useValues(maxThreadLogic)
 
     const groupType = messages[0].type === 'human' ? 'human' : 'ai'
     const isEditingInsight = tools?.some((tool) => tool.name === 'create_and_query_insight')
@@ -149,15 +151,21 @@ function MessageGroup({ messages, isFinal: isFinalGroup }: MessageGroupProps): J
     return (
         <MessageGroupContainer groupType={groupType}>
             <Tooltip title={groupType === 'human' ? 'You' : 'Max'}>
-                <ProfilePicture
-                    user={
-                        groupType === 'human'
-                            ? { ...user, hedgehog_config: undefined }
-                            : { hedgehog_config: { ...user?.hedgehog_config, use_as_profile: true } }
-                    }
-                    size="lg"
-                    className="hidden @md/thread:flex mt-1 border"
-                />
+                {groupType === 'human' ? (
+                    <ProfilePicture
+                        user={{ ...user, hedgehog_config: undefined }}
+                        size="lg"
+                        className="hidden @md/thread:flex mt-1 border"
+                    />
+                ) : (
+                    <div className="hidden @md/thread:flex mt-1">
+                        <HedgehogAvatar
+                            onExpand={() => {}}
+                            isExpanded={false}
+                            continuousPhoneAnimation={isFinalGroup && streamingActive}
+                        />
+                    </div>
+                )}
             </Tooltip>
             <div
                 className={clsx(
