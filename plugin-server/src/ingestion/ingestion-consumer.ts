@@ -68,7 +68,7 @@ const KNOWN_SET_EVENTS = new Set([
     'survey sent',
 ])
 
-const trackIfNonPersonEventUpdatesPersons = (event: PipelineEvent) => {
+const trackIfNonPersonEventUpdatesPersons = (event: PipelineEvent): void => {
     if (
         !PERSON_EVENTS.has(event.event) &&
         !KNOWN_SET_EVENTS.has(event.event) &&
@@ -99,6 +99,9 @@ export class IngestionConsumer {
     public groupStore: BatchWritingGroupStore
     private eventIngestionRestrictionManager: EventIngestionRestrictionManager
     public readonly promiseScheduler = new PromiseScheduler()
+
+    // Batch completion tracking for graceful shutdown and rebalancing
+    private currentBatchPromise: Promise<{ backgroundTask?: Promise<any> }> | null = null
 
     constructor(
         private hub: Hub,
@@ -207,7 +210,7 @@ export class IngestionConsumer {
         logger.info('👍', `${this.name} - stopped!`)
     }
 
-    public isHealthy() {
+    public isHealthy(): boolean {
         return this.kafkaConsumer?.isHealthy()
     }
 
@@ -292,6 +295,17 @@ export class IngestionConsumer {
     }
 
     public async handleKafkaBatch(messages: Message[]): Promise<{ backgroundTask?: Promise<any> }> {
+        // Track the current batch promise for coordination during rebalancing
+        this.currentBatchPromise = this.processBatch(messages)
+
+        try {
+            return await this.currentBatchPromise
+        } finally {
+            this.currentBatchPromise = null
+        }
+    }
+
+    private async processBatch(messages: Message[]): Promise<{ backgroundTask?: Promise<any> }> {
         if (this.hub.KAFKA_BATCH_START_LOGGING_ENABLED) {
             this.logBatchStart(messages)
         }
@@ -507,7 +521,7 @@ export class IngestionConsumer {
         }
     }
 
-    private async handleProcessingErrorV1(error: any, message: Message, event: PipelineEvent) {
+    private async handleProcessingErrorV1(error: any, message: Message, event: PipelineEvent): Promise<void> {
         logger.error('🔥', `Error processing message`, {
             stack: error.stack,
             error: error,
@@ -607,7 +621,7 @@ export class IngestionConsumer {
 
             if (this.shouldSkipPerson(event.token, event.distinct_id)) {
                 event.properties = {
-                    ...(event.properties ?? {}),
+                    ...event.properties,
                     $process_person_profile: false,
                 }
             }
@@ -618,7 +632,7 @@ export class IngestionConsumer {
         return Promise.resolve(batch)
     }
 
-    private groupEventsByDistinctId(messages: IncomingEventWithTeam[]) {
+    private groupEventsByDistinctId(messages: IncomingEventWithTeam[]): IncomingEventsByDistinctId {
         const batches: IncomingEventsByDistinctId = {}
         for (const { event, message, team } of messages) {
             const token = event.token ?? ''
@@ -656,7 +670,7 @@ export class IngestionConsumer {
         return resolvedMessages
     }
 
-    private logDroppedEvent(token?: string, distinctId?: string) {
+    private logDroppedEvent(token?: string, distinctId?: string): void {
         logger.debug('🔁', `Dropped event`, {
             token,
             distinctId,
@@ -669,28 +683,28 @@ export class IngestionConsumer {
             .inc()
     }
 
-    private shouldDropEvent(token?: string, distinctId?: string) {
+    private shouldDropEvent(token?: string, distinctId?: string): boolean {
         if (!token) {
             return false
         }
         return this.eventIngestionRestrictionManager.shouldDropEvent(token, distinctId)
     }
 
-    private shouldSkipPerson(token?: string, distinctId?: string) {
+    private shouldSkipPerson(token?: string, distinctId?: string): boolean {
         if (!token) {
             return false
         }
         return this.eventIngestionRestrictionManager.shouldSkipPerson(token, distinctId)
     }
 
-    private shouldForceOverflow(token?: string, distinctId?: string) {
+    private shouldForceOverflow(token?: string, distinctId?: string): boolean {
         if (!token) {
             return false
         }
         return this.eventIngestionRestrictionManager.shouldForceOverflow(token, distinctId)
     }
 
-    private overflowEnabled() {
+    private overflowEnabled(): boolean {
         return (
             !!this.hub.INGESTION_CONSUMER_OVERFLOW_TOPIC &&
             this.hub.INGESTION_CONSUMER_OVERFLOW_TOPIC !== this.topic &&
@@ -698,7 +712,7 @@ export class IngestionConsumer {
         )
     }
 
-    private async emitToOverflow(kafkaMessages: Message[], preservePartitionLocalityOverride?: boolean) {
+    private async emitToOverflow(kafkaMessages: Message[], preservePartitionLocalityOverride?: boolean): Promise<void> {
         const overflowTopic = this.hub.INGESTION_CONSUMER_OVERFLOW_TOPIC
         if (!overflowTopic) {
             throw new Error('No overflow topic configured')
@@ -733,7 +747,7 @@ export class IngestionConsumer {
         )
     }
 
-    private async emitToTestingTopic(kafkaMessages: Message[]) {
+    private async emitToTestingTopic(kafkaMessages: Message[]): Promise<void> {
         const testingTopic = this.testingTopic
         if (!testingTopic) {
             throw new Error('No testing topic configured')
@@ -749,5 +763,34 @@ export class IngestionConsumer {
                 })
             )
         )
+    }
+
+    private async waitForBackgroundTasks(): Promise<void> {
+        logger.info('🔁', `${this.name} - waiting for background tasks completion`)
+
+        try {
+            // Wait for current batch to complete if one is in progress
+            if (this.currentBatchPromise) {
+                logger.info('🔁', `${this.name} - waiting for current batch to complete`)
+                const batchResult = await this.currentBatchPromise
+
+                // Also wait for the background task from the current batch
+                if (batchResult.backgroundTask) {
+                    logger.info('🔁', `${this.name} - waiting for current batch background task`)
+                    await batchResult.backgroundTask
+                }
+            }
+
+            // Wait for promise scheduler to complete all scheduled work
+            await this.promiseScheduler.waitForAll()
+
+            // Wait for hog transformer to complete all invocation results
+            await this.hogTransformer.processInvocationResults()
+
+            logger.info('🔁', `${this.name} - background tasks completed`)
+        } catch (error) {
+            logger.error('🔥', `${this.name} - error during background task coordination`, { error })
+            // Don't throw the error - we want rebalancing to continue even if background tasks fail
+        }
     }
 }

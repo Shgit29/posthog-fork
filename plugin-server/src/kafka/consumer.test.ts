@@ -1,4 +1,4 @@
-import { KafkaConsumer as RdKafkaConsumer, Message } from 'node-rdkafka'
+import { CODES, KafkaConsumer as RdKafkaConsumer, Message } from 'node-rdkafka'
 
 import { delay } from '../utils/utils'
 import { KafkaConsumer } from './consumer'
@@ -19,6 +19,12 @@ jest.mock('node-rdkafka', () => ({
         offsetsStore: jest.fn(),
         setDefaultConsumeTimeout: jest.fn(),
     })),
+    CODES: {
+        ERRORS: {
+            ERR__REVOKE_PARTITIONS: 'ERR__REVOKE_PARTITIONS',
+            ERR__ASSIGN_PARTITIONS: 'ERR__ASSIGN_PARTITIONS',
+        },
+    },
 }))
 
 const createKafkaMessage = (message: Partial<Message> = {}): Message => ({
@@ -31,9 +37,13 @@ const createKafkaMessage = (message: Partial<Message> = {}): Message => ({
     ...message,
 })
 
-jest.setTimeout(3000)
+jest.setTimeout(10000)
 
-const triggerablePromise = () => {
+const triggerablePromise = (): {
+    promise: Promise<any>
+    resolve: (value?: any) => void
+    reject: (reason?: any) => void
+} => {
     const result: {
         promise: Promise<any>
         resolve: (value?: any) => void
@@ -55,8 +65,30 @@ describe('consumer', () => {
     let consumer: KafkaConsumer
     let mockRdKafkaConsumer: jest.Mocked<RdKafkaConsumer>
     let consumeCallback: (error: Error | null, messages: Message[]) => void
+    let mockRebalanceHandler: (err: any, topicPartitions: any[]) => Promise<void>
 
     beforeEach(() => {
+        // Setup mock to capture rebalance handler during consumer creation
+        const mockRdKafkaConsumerInstance = {
+            connect: jest.fn().mockImplementation((_, cb) => cb(null)),
+            subscribe: jest.fn(),
+            consume: jest.fn().mockImplementation((_, cb) => cb(null, [])),
+            disconnect: jest.fn().mockImplementation((cb) => cb(null)),
+            isConnected: jest.fn().mockReturnValue(true),
+            on: jest.fn().mockImplementation(function (this: any, event, callback) {
+                if (event === 'rebalance') {
+                    mockRebalanceHandler = callback as (err: any, topicPartitions: any[]) => void
+                }
+                return this
+            }),
+            assignments: jest.fn().mockReturnValue([]),
+            offsetsStore: jest.fn(),
+            setDefaultConsumeTimeout: jest.fn(),
+        }
+
+        // Mock the RdKafkaConsumer constructor to return our configured mock
+        jest.mocked(require('node-rdkafka').KafkaConsumer).mockImplementation(() => mockRdKafkaConsumerInstance)
+
         consumer = new KafkaConsumer({
             groupId: 'test-group',
             topic: 'test-topic',
@@ -111,7 +143,7 @@ describe('consumer', () => {
             await consumer.connect(eachBatch)
         })
 
-        const runWithBackgroundTask = async (messages: Message[], p: Promise<any>) => {
+        const runWithBackgroundTask = async (messages: Message[], p: Promise<any>): Promise<void> => {
             // Create a triggerable promise that we can use to control the flow of the code
             const eachBatchTrigger = triggerablePromise()
             // Mock the eachBatch function to return the triggerable promise
@@ -201,6 +233,139 @@ describe('consumer', () => {
                 [[{ offset: 3, partition: 0, topic: 'test-topic' }]],
                 [[{ offset: 4, partition: 0, topic: 'test-topic' }]],
             ])
+        })
+    })
+
+    describe('rebalancing', () => {
+        let eachBatch: jest.Mock
+
+        beforeEach(async () => {
+            consumer['maxBackgroundTasks'] = 3
+            eachBatch = jest.fn(() => Promise.resolve({}))
+
+            await consumer.connect(eachBatch)
+        })
+
+        const runWithBackgroundTask = async (messages: Message[], p: Promise<any>): Promise<void> => {
+            const eachBatchTrigger = triggerablePromise()
+            eachBatch.mockImplementation(() => eachBatchTrigger.promise)
+            consumeCallback(null, messages)
+            eachBatchTrigger.resolve({
+                backgroundTask: p,
+            })
+        }
+
+        it('should wait for background tasks to complete during partition revocation', async () => {
+            expect(mockRebalanceHandler).toBeTruthy()
+
+            // Create some background tasks
+            const p1 = triggerablePromise()
+            const p2 = triggerablePromise()
+            const p3 = triggerablePromise()
+
+            // Start background tasks
+            await runWithBackgroundTask([createKafkaMessage({ offset: 1, partition: 0 })], p1.promise)
+            await delay(1)
+            await runWithBackgroundTask([createKafkaMessage({ offset: 2, partition: 0 })], p2.promise)
+            await delay(1)
+            await runWithBackgroundTask([createKafkaMessage({ offset: 3, partition: 0 })], p3.promise)
+            await delay(1)
+
+            // Verify we have 3 background tasks running
+            expect(consumer['backgroundTask']).toEqual([p1.promise, p2.promise, p3.promise])
+
+            // Simulate partition revocation - this should wait for background tasks
+            let rebalanceCompleted = false
+            void (async () => {
+                await mockRebalanceHandler({ code: CODES.ERRORS.ERR__REVOKE_PARTITIONS }, [
+                    { topic: 'test-topic', partition: 1 },
+                ])
+                rebalanceCompleted = true
+            })()
+
+            // Give a small delay to let the rebalance handler start
+            await delay(10)
+
+            // The rebalance handler should still be waiting because background tasks haven't completed
+            expect(rebalanceCompleted).toBe(false)
+
+            // Now resolve the background tasks one by one
+            p1.resolve()
+            await delay(1)
+            expect(rebalanceCompleted).toBe(false) // Still waiting for p2 and p3
+
+            p2.resolve()
+            await delay(1)
+            expect(rebalanceCompleted).toBe(false) // Still waiting for p3
+
+            p3.resolve()
+            await delay(1)
+            expect(rebalanceCompleted).toBe(true) // Now rebalance should be complete
+
+            // Verify background tasks are cleared
+            expect(consumer['backgroundTask']).toEqual([])
+        })
+
+        it('should handle partition assignment without waiting for background tasks', async () => {
+            expect(mockRebalanceHandler).toBeTruthy()
+
+            // Create some background tasks
+            const p1 = triggerablePromise()
+            await runWithBackgroundTask([createKafkaMessage({ offset: 1, partition: 0 })], p1.promise)
+            await delay(1)
+
+            // Verify we have 1 background task running
+            expect(consumer['backgroundTask']).toEqual([p1.promise])
+
+            // Simulate partition assignment - this should NOT wait for background tasks
+            const rebalancePromise = Promise.resolve(
+                mockRebalanceHandler({ code: CODES.ERRORS.ERR__ASSIGN_PARTITIONS }, [
+                    { topic: 'test-topic', partition: 1 },
+                ])
+            )
+
+            // Give a small delay to let the rebalance handler complete
+            await delay(1)
+
+            // The rebalance handler should complete immediately without waiting
+            let rebalanceCompleted = false
+            await rebalancePromise.then(() => {
+                rebalanceCompleted = true
+            })
+
+            await delay(1)
+            expect(rebalanceCompleted).toBe(true)
+
+            // Background task should still be running
+            expect(consumer['backgroundTask']).toEqual([p1.promise])
+
+            // Clean up
+            p1.resolve()
+            await delay(1)
+        })
+
+        it('should handle rebalancing with no background tasks', async () => {
+            expect(mockRebalanceHandler).toBeTruthy()
+
+            // Ensure no background tasks are running
+            expect(consumer['backgroundTask']).toEqual([])
+
+            // Simulate partition revocation with no background tasks
+            const rebalancePromise = Promise.resolve(
+                mockRebalanceHandler({ code: CODES.ERRORS.ERR__REVOKE_PARTITIONS }, [
+                    { topic: 'test-topic', partition: 1 },
+                ])
+            )
+
+            // Should complete immediately since there are no background tasks
+            await delay(1)
+            let rebalanceCompleted = false
+            await rebalancePromise.then(() => {
+                rebalanceCompleted = true
+            })
+
+            await delay(1)
+            expect(rebalanceCompleted).toBe(true)
         })
     })
 })

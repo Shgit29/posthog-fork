@@ -1,4 +1,5 @@
 import {
+    Assignment,
     ClientMetrics,
     CODES,
     ConsumerGlobalConfig,
@@ -129,6 +130,9 @@ export class KafkaConsumer {
     private consumerLoop: Promise<void> | undefined
     private backgroundTask: Promise<void>[]
     private podName: string
+    private rebalanceCoordination: {
+        revokedPartitions: TopicPartitionOffset[]
+    } = { revokedPartitions: [] }
 
     constructor(private config: KafkaConsumerConfig, rdKafkaConfig: RdKafkaConsumerConfig = {}) {
         this.backgroundTask = []
@@ -175,29 +179,29 @@ export class KafkaConsumer {
         this.rdKafkaConsumer = this.createConsumer()
     }
 
-    public getConfig() {
+    public getConfig(): ConsumerGlobalConfig {
         return {
             ...this.consumerConfig,
         }
     }
 
-    public heartbeat() {
+    public heartbeat(): void {
         // Can be called externally to update the heartbeat time and keep the consumer alive
         this.lastHeartbeatTime = Date.now()
     }
 
-    public isHealthy() {
+    public isHealthy(): boolean {
         // this is called as a readiness and a liveness probe
         const isWithinInterval = Date.now() - this.lastHeartbeatTime < this.maxHealthHeartbeatIntervalMs
         const isConnected = this.rdKafkaConsumer.isConnected()
         return isConnected && isWithinInterval
     }
 
-    public assignments() {
+    public assignments(): Assignment[] {
         return this.rdKafkaConsumer.isConnected() ? this.rdKafkaConsumer.assignments() : []
     }
 
-    public offsetsStore(topicPartitionOffsets: TopicPartitionOffset[]) {
+    public offsetsStore(topicPartitionOffsets: TopicPartitionOffset[]): void {
         return this.rdKafkaConsumer.offsetsStore(topicPartitionOffsets)
     }
 
@@ -238,14 +242,14 @@ export class KafkaConsumer {
         return meta.topics.find((x) => x.name === topic)?.partitions ?? []
     }
 
-    private createConsumer() {
+    private createConsumer(): RdKafkaConsumer {
         const consumer = new RdKafkaConsumer(this.consumerConfig, {
             // Default settings
             'auto.offset.reset': 'earliest',
         })
 
         // Set up rebalancing event handlers
-        consumer.on('rebalance', (err, topicPartitions) => {
+        consumer.on('rebalance', async (err, topicPartitions) => {
             logger.info('🔁', 'kafka_consumer_rebalancing', { err, topicPartitions })
 
             if (err.code === CODES.ERRORS.ERR__ASSIGN_PARTITIONS) {
@@ -261,6 +265,25 @@ export class KafkaConsumer {
                     )
                 })
             } else if (err.code === CODES.ERRORS.ERR__REVOKE_PARTITIONS) {
+                // Store revoked partitions for offset committing
+                this.rebalanceCoordination.revokedPartitions = topicPartitions.map((tp) => ({
+                    topic: tp.topic,
+                    partition: tp.partition,
+                    offset: -1, // Will be set when committing
+                }))
+
+                logger.info('🔁', 'partition_revocation_starting', {
+                    backgroundTaskCount: this.backgroundTask.length,
+                    revokedPartitions: this.rebalanceCoordination.revokedPartitions.map((tp) => ({
+                        topic: tp.topic,
+                        partition: tp.partition,
+                    })),
+                })
+
+                // Wait for all background tasks to complete
+                await Promise.all(this.backgroundTask)
+
+                // Update metrics after coordination is complete
                 topicPartitions.forEach((tp) => {
                     kafkaConsumerAssignment.set(
                         {
@@ -312,7 +335,7 @@ export class KafkaConsumer {
         return consumer
     }
 
-    private storeOffsetsForMessages = (messages: Message[]) => {
+    private storeOffsetsForMessages = (messages: Message[]): void => {
         const topicPartitionOffsets = findOffsetsToCommit(messages).map((message) => {
             return {
                 ...message,
@@ -338,7 +361,9 @@ export class KafkaConsumer {
         }
     }
 
-    public async connect(eachBatch: (messages: Message[]) => Promise<{ backgroundTask?: Promise<any> } | void>) {
+    public async connect(
+        eachBatch: (messages: Message[]) => Promise<{ backgroundTask?: Promise<any> } | void>
+    ): Promise<void> {
         const { topic, groupId, callEachBatchWhenEmpty = false } = this.config
 
         try {
@@ -364,7 +389,7 @@ export class KafkaConsumer {
         this.rdKafkaConsumer.setDefaultConsumeTimeout(this.config.batchTimeoutMs || DEFAULT_BATCH_TIMEOUT_MS)
         this.rdKafkaConsumer.subscribe([this.config.topic])
 
-        const startConsuming = async () => {
+        const startConsuming = async (): Promise<void> => {
             let lastConsumeTime = 0
             try {
                 while (!this.isStopping) {
@@ -487,12 +512,35 @@ export class KafkaConsumer {
         })
     }
 
-    public async disconnect() {
+    private async waitForRebalanceCoordination(): Promise<void> {
+        logger.info('🔁', 'rebalance_coordination_initiated', {
+            backgroundTaskCount: this.backgroundTask.length,
+            revokedPartitions: this.rebalanceCoordination.revokedPartitions.map((tp) => ({
+                topic: tp.topic,
+                partition: tp.partition,
+            })),
+        })
+
+        // Wait for all background tasks to complete
+        await Promise.all(this.backgroundTask)
+
+        logger.info('🔁', 'rebalance_coordination_completed')
+    }
+
+    public async disconnect(): Promise<void> {
         if (this.isStopping) {
             return
         }
         // Mark as stopping - this will also essentially stop the consumer loop
         this.isStopping = true
+
+        // Wait for background tasks to complete before disconnecting
+        logger.info('🔁', 'waiting_for_background_tasks_before_disconnect', {
+            backgroundTaskCount: this.backgroundTask.length,
+        })
+        await Promise.all(this.backgroundTask)
+
+        logger.info('🔁', 'background_tasks_completed_proceeding_with_disconnect')
 
         // Allow the in progress consumer loop to finish if possible
         if (this.consumerLoop) {
@@ -508,7 +556,7 @@ export class KafkaConsumer {
         await this.disconnectConsumer()
     }
 
-    private async disconnectConsumer() {
+    private async disconnectConsumer(): Promise<void> {
         if (this.rdKafkaConsumer.isConnected()) {
             logger.info('📝', 'Disconnecting consumer...')
             await new Promise<void>((res, rej) => this.rdKafkaConsumer.disconnect((e) => (e ? rej(e) : res())))
